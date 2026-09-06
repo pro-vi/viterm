@@ -7386,6 +7386,7 @@ name = "wezterm-uds"
 version = "0.1.0"
 dependencies = [
  "async-io",
+ "libc",
  "uds_windows",
 ]
 

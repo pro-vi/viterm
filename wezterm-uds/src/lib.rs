@@ -97,9 +97,84 @@ impl Write for UnixStream {
 
 unsafe impl async_io::IoSafe for UnixStream {}
 
+/// Socket buffer size we ask the kernel for on the mux protocol connection.
+///
+/// `mux::allocate_socketpair` already raises the pty socketpairs to 1 MiB, but
+/// the unix domain socket carrying the mux protocol itself was never raised, so
+/// it inherited the OS default. On macOS that default is 8 KiB
+/// (`net.local.stream.sendspace` / `recvspace`), and attaching a GUI to a
+/// server with many panes deadlocks: both sides write large payloads while
+/// neither is reading, both buffers fill, and the connection wedges.
+///
+/// Overridable via `WEZTERM_UDS_BUFSIZE` so the failure can be reproduced
+/// without changing a machine-wide sysctl.
+#[cfg(unix)]
+const DEFAULT_BUFSIZE: usize = 1024 * 1024;
+
+#[cfg(unix)]
+fn desired_bufsize() -> usize {
+    match std::env::var("WEZTERM_UDS_BUFSIZE") {
+        Ok(v) => v.parse().unwrap_or(DEFAULT_BUFSIZE),
+        Err(_) => DEFAULT_BUFSIZE,
+    }
+}
+
 impl UnixStream {
     pub fn connect<P: AsRef<Path>>(path: P) -> std::io::Result<Self> {
-        Ok(Self(StreamImpl::connect(path)?))
+        Ok(Self::tuned(StreamImpl::connect(path)?))
+    }
+
+    /// Wrap a stream and raise its socket buffers, best-effort.
+    ///
+    /// Failure is deliberately ignored: this is purely a throughput
+    /// consideration, and a system whose cap is below what we ask for must
+    /// still be able to connect. Same posture as the resolution of #6712.
+    fn tuned(stream: StreamImpl) -> Self {
+        let me = Self(stream);
+        #[cfg(unix)]
+        me.set_socket_buffers(desired_bufsize());
+        me
+    }
+
+    #[cfg(unix)]
+    fn set_socket_buffers(&self, size: usize) {
+        let size = size as libc::c_int;
+        let socklen = std::mem::size_of_val(&size) as libc::socklen_t;
+        for option in [libc::SO_SNDBUF, libc::SO_RCVBUF] {
+            unsafe {
+                libc::setsockopt(
+                    self.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    option,
+                    &size as *const libc::c_int as *const _,
+                    socklen,
+                );
+            }
+        }
+        // Investigation aid, not for the eventual patch: read back what the
+        // kernel actually granted, so a negative reproduction cannot be
+        // confused with "the setsockopt never happened".
+        if std::env::var("WEZTERM_UDS_DEBUG").is_ok() {
+            let mut got: libc::c_int = 0;
+            let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+            let mut readback = [0i32; 2];
+            for (i, option) in [libc::SO_SNDBUF, libc::SO_RCVBUF].iter().enumerate() {
+                unsafe {
+                    libc::getsockopt(
+                        self.as_raw_fd(),
+                        libc::SOL_SOCKET,
+                        *option,
+                        &mut got as *mut libc::c_int as *mut _,
+                        &mut len,
+                    );
+                }
+                readback[i] = got;
+            }
+            eprintln!(
+                "wezterm-uds: fd {} asked {} -> snd {} rcv {}",
+                self.as_raw_fd(), size, readback[0], readback[1]
+            );
+        }
     }
 }
 
@@ -125,11 +200,11 @@ impl UnixListener {
 
     pub fn accept(&self) -> std::io::Result<(UnixStream, SocketAddr)> {
         let (stream, addr) = self.0.accept()?;
-        Ok((UnixStream(stream), addr))
+        Ok((UnixStream::tuned(stream), addr))
     }
 
     pub fn incoming(&self) -> impl Iterator<Item = std::io::Result<UnixStream>> + '_ {
-        self.0.incoming().map(|r| r.map(UnixStream))
+        self.0.incoming().map(|r| r.map(UnixStream::tuned))
     }
 }
 
