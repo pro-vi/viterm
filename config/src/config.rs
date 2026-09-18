@@ -488,6 +488,14 @@ pub struct Config {
     #[dynamic(default)]
     pub tab_bar_at_bottom: bool,
 
+    /// The number of rows of tabs to show in the tab bar. The default is 1.
+    /// With a larger value the tab bar is that many rows tall and the tabs
+    /// are distributed over the rows, which lets each tab be wider and its
+    /// title longer. Only the fancy tab bar honours this; the retro tab bar
+    /// is always a single row.
+    #[dynamic(default = "default_tab_bar_rows")]
+    pub tab_bar_rows: usize,
+
     #[dynamic(default = "default_true")]
     pub mouse_wheel_scrolls_tabs: bool,
 
@@ -1885,6 +1893,10 @@ fn default_enq_answerback() -> String {
 
 fn default_tab_max_width() -> usize {
     16
+}
+
+fn default_tab_bar_rows() -> usize {
+    1
 }
 
 fn default_update_interval() -> u64 {
