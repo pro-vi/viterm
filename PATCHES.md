@@ -4,7 +4,8 @@
 `unit/<slug>` branch, based on `upstream/main`, containing only that change and
 written so it could be sent upstream as it stands. `build` is `upstream/main`
 plus a merge of every active unit, and every local build comes from `build`.
-This file and the `.inbox/` notes exist only on `build`.
+This file, `CLAUDE.md` and the `.inbox/` notes exist only on `build`; `CLAUDE.md`
+is where the rules live, this file is what they produced.
 
 A carried third-party patch is applied with `git am` so authorship stays with
 its author, and its row says `carried`. `git cherry upstream/main unit/<slug>`
