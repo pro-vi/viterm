@@ -22,4 +22,36 @@ The units proposed in `.inbox/2026-09-06-viterm-freeze-fork-plan.md` — the
 focus-storm fix carried from PR #7763, the tab title memo, the mux socket
 buffers, the client move-pane id translation, user-var replay on attach, tab
 order over the protocol, and a vertical tab bar carried from upstream — have no
-branches yet.
+branches yet. Three more, from the session that built the two tab bar units:
+
+| slug | side | why | state |
+|---|---|---|---|
+| `flash-message` | gui | `window:flash(text)`: large centred numerals over the panes for transient feedback, so the tab-jump digits do not have to live in the status bar. Chosen from four rendered candidates; the spec, with every duration and curve written as a number, is `.inbox/2026-09-18-flash-message-unit-spec.md` | specified, not started. The one open question is whether the 0.96→1 scale can be done without re-shaping text per frame |
+| `mux-tab-get-index` | gui | `MuxTab` has no way to report where it sits, while `window:tabs_with_info()` has `index` and `format-tab-title` gets `tab_index`. Everyone reaches for `tab:get_index()` because every neighbouring API has it, and a config that does gets `attempt to call a nil value` at runtime with the reason only in a log file. Cost two real bugs in bootstrap's config on 2026-09-18 | not started. About twenty lines and a docs page, branches off `upstream/main`, and the first thing here worth sending upstream as a PR |
+
+And one decision recorded so it is not rebuilt from scratch:
+
+**`tab_bar_rows = "auto"` was considered and declined.** Letting the row count
+follow the tab count sounds obviously right and is not. The row count is part of
+the window's geometry, so changing it resizes the terminal area and reflows every
+pane in the focused tab — on the machine this fork was built for, a mux round
+trip across 39 panes — and the trigger would be *opening a tab*, an action taken
+without looking at the bar. Near any threshold it also flaps, and the fix for
+flapping is a hysteresis constant standing in for a property nobody has named.
+The property actually wanted is "can I recognise this tab", which depends on
+which characters survive rather than how many; the answer to that is grouping
+tabs by repo so the name is said once, not more rows. If a row count must change
+on its own, the defensible trigger is a window resize or a display change, not a
+tab count — and better still is a key that fits the rows on demand, which needs
+no engine change at all.
+
+Two layouts were sketched against the live 26-tab session and are worth naming
+before anyone re-derives them. **Grouped rows**: tabs clustered by repo, the name
+shown once per group and each tab carrying only its slot suffix, groups never
+split across rows — it buys legibility by writing less rather than by allocating
+more width, and it needs the engine to let Lua say which row a tab belongs on.
+**Two-tier**: one chip per project on the first row, the focused project's tabs
+on the second — the widest labels of the three and the only one that hides tabs,
+which is the wrong trade for a workflow that uses 26 open tabs as spatial memory.
+Both need a Lua-facing row assignment; neither is worth building until two plain
+rows stop being enough.
