@@ -303,7 +303,11 @@ impl crate::TermWindow {
                 _ => 0.,
             })
             .sum();
-        let max_tab_width = ((self.dimensions.pixel_width as f32 / num_tabs)
+        let rows = self.config.tab_bar_rows.max(1);
+        // Each row gets its own share of the window width, so a tab may be
+        // that many times wider than it would be on a single row.
+        let tabs_per_row = (num_tabs / rows as f32).ceil().max(1.);
+        let max_tab_width = ((self.dimensions.pixel_width as f32 / tabs_per_row)
             - (1.5 * metrics.cell_size.width as f32))
             .max(0.);
 
@@ -357,15 +361,6 @@ impl crate::TermWindow {
             }
         }
 
-        let mut children = vec![];
-
-        if !left_status.is_empty() {
-            children.push(
-                Element::new(&font, ElementContent::Children(left_status))
-                    .colors(bar_colors.clone()),
-            );
-        }
-
         let window_buttons_at_left = self
             .config
             .window_decorations
@@ -390,25 +385,101 @@ impl crate::TermWindow {
             Dimension::Cells(0.5)
         };
 
-        children.push(
-            Element::new(&font, ElementContent::Children(left_eles))
+        let tab_run = |eles: Vec<Element>, padding_left: Dimension| {
+            Element::new(&font, ElementContent::Children(eles))
                 .vertical_align(VerticalAlign::Bottom)
                 .colors(bar_colors.clone())
                 .padding(BoxDimension {
-                    left: left_padding,
+                    left: padding_left,
                     right: Dimension::Cells(0.),
                     top: Dimension::Cells(0.),
                     bottom: Dimension::Cells(0.),
                 })
-                .zindex(1),
-        );
-        children.push(
-            Element::new(&font, ElementContent::Children(right_eles))
-                .colors(bar_colors.clone())
-                .float(Float::Right),
-        );
+                .zindex(1)
+        };
 
-        let content = ElementContent::Children(children);
+        let content = if rows > 1 {
+            // Spread the tabs over the rows, keeping their order. The status
+            // areas belong to the first row; the remaining rows hold tabs
+            // alone. A Block child starts a new line in the box model, so one
+            // Block per row is what stacks them.
+            let per_row = (left_eles.len() + rows - 1) / rows;
+            let mut remaining = left_eles;
+            let mut left_status = Some(left_status);
+            let mut right_eles = Some(right_eles);
+            let row_height = tab_bar_height / rows as f32;
+            let mut row_eles = vec![];
+
+            for row in 0..rows {
+                let take = if row + 1 == rows {
+                    remaining.len()
+                } else {
+                    per_row.min(remaining.len())
+                };
+                let mine: Vec<Element> = remaining.drain(0..take).collect();
+
+                let mut row_children = vec![];
+                if row == 0 {
+                    let status = left_status.take().unwrap_or_default();
+                    if !status.is_empty() {
+                        row_children.push(
+                            Element::new(&font, ElementContent::Children(status))
+                                .colors(bar_colors.clone()),
+                        );
+                    }
+                }
+                row_children.push(tab_run(
+                    mine,
+                    if row == 0 {
+                        left_padding
+                    } else {
+                        Dimension::Cells(0.5)
+                    },
+                ));
+                if row == 0 {
+                    row_children.push(
+                        Element::new(
+                            &font,
+                            ElementContent::Children(right_eles.take().unwrap_or_default()),
+                        )
+                        .colors(bar_colors.clone())
+                        .float(Float::Right),
+                    );
+                }
+
+                // No vertical_align here: aligning a row to the bottom of the
+                // whole bar makes it claim the bar's full height, which pushes
+                // the next row past the bottom edge where it is clipped. The
+                // tabs inside each row are bottom aligned by tab_run instead.
+                row_eles.push(
+                    Element::new(&font, ElementContent::Children(row_children))
+                        .display(DisplayType::Block)
+                        .min_width(Some(Dimension::Pixels(self.dimensions.pixel_width as f32)))
+                        .min_height(Some(Dimension::Pixels(row_height)))
+                        .colors(bar_colors.clone()),
+                );
+            }
+
+            ElementContent::Children(row_eles)
+        } else {
+            let mut children = vec![];
+
+            if !left_status.is_empty() {
+                children.push(
+                    Element::new(&font, ElementContent::Children(left_status))
+                        .colors(bar_colors.clone()),
+                );
+            }
+
+            children.push(tab_run(left_eles, left_padding));
+            children.push(
+                Element::new(&font, ElementContent::Children(right_eles))
+                    .colors(bar_colors.clone())
+                    .float(Float::Right),
+            );
+
+            ElementContent::Children(children)
+        };
 
         let tabs = Element::new(&font, content)
             .display(DisplayType::Block)
