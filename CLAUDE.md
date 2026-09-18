@@ -1,7 +1,8 @@
-# pro-vi/wezterm — a fork that carries patches, not a fork that diverges
+# pro-vi/viterm — a fork that carries patches, not a fork that diverges
 
-This checkout builds the terminal this machine runs. It is **not** an upstream
-contribution checkout, and the workflow in `CONTRIBUTING.md` — commit to a
+This checkout builds the terminal this machine runs — ViTerm is the name of
+that terminal, and this fork of wezterm/wezterm is its engine. It is **not** an
+upstream contribution checkout, and the workflow in `CONTRIBUTING.md` — commit to a
 branch, open a pull request against wezterm/wezterm — describes upstream's
 process, not this one. Read this file first.
 
