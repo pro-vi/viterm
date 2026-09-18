@@ -123,8 +123,8 @@ pub enum TermWindowNotif {
         assignment: KeyAssignment,
         tx: Option<Sender<anyhow::Result<()>>>,
     },
-    SetLeftStatus(String),
-    SetRightStatus(String),
+    SetLeftStatus { status: String, row: usize },
+    SetRightStatus { status: String, row: usize },
     GetDimensions(Sender<(Dimensions, WindowState)>),
     GetSelectionForPane {
         pane_id: PaneId,
@@ -395,8 +395,10 @@ pub struct TermWindow {
     show_scroll_bar: bool,
     tab_bar: TabBarState,
     fancy_tab_bar: Option<box_model::ComputedElement>,
-    pub right_status: String,
-    pub left_status: String,
+    /// Status text per tab bar row; index 0 is the first row, which is the
+    /// only one the retro tab bar and a single-row fancy tab bar can show.
+    pub right_status: Vec<String>,
+    pub left_status: Vec<String>,
     last_ui_item: Option<UIItem>,
     /// Tracks whether the current mouse-down event is part of click-focus.
     /// If so, we ignore mouse events until released
@@ -717,8 +719,8 @@ impl TermWindow {
             show_scroll_bar: config.enable_scroll_bar,
             tab_bar: TabBarState::default(),
             fancy_tab_bar: None,
-            right_status: String::new(),
-            left_status: String::new(),
+            right_status: vec![String::new()],
+            left_status: vec![String::new()],
             last_mouse_coords: (0, -1),
             window_drag_position: None,
             current_mouse_event: None,
@@ -1153,17 +1155,15 @@ impl TermWindow {
                     tx.try_send(result).ok();
                 }
             }
-            TermWindowNotif::SetRightStatus(status) => {
-                if status != self.right_status {
-                    self.right_status = status;
+            TermWindowNotif::SetRightStatus { status, row } => {
+                if Self::set_row_status(&mut self.right_status, row, status) {
                     self.update_title_post_status();
                 } else {
                     self.schedule_next_status_update();
                 }
             }
-            TermWindowNotif::SetLeftStatus(status) => {
-                if status != self.left_status {
-                    self.left_status = status;
+            TermWindowNotif::SetLeftStatus { status, row } => {
+                if Self::set_row_status(&mut self.left_status, row, status) {
                     self.update_title_post_status();
                 } else {
                     self.schedule_next_status_update();
@@ -1722,6 +1722,19 @@ impl TermWindow {
                 .replace(config::TermConfig::new().color_palette());
         }
         self.palette.as_ref().unwrap()
+    }
+
+    /// Store `status` as the text for `row`, growing the vector as needed.
+    /// Returns true when the text differs from what that row already had.
+    fn set_row_status(slots: &mut Vec<String>, row: usize, status: String) -> bool {
+        if slots.len() <= row {
+            slots.resize(row + 1, String::new());
+        }
+        if slots[row] == status {
+            return false;
+        }
+        slots[row] = status;
+        true
     }
 
     pub fn config_was_reloaded(&mut self) {
