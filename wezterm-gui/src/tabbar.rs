@@ -27,8 +27,10 @@ pub struct TabBarState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TabBarItem {
     None,
-    LeftStatus,
-    RightStatus,
+    /// The left status area of the given tab bar row, counting from 0.
+    LeftStatus(usize),
+    /// The right status area of the given tab bar row, counting from 0.
+    RightStatus(usize),
     Tab { tab_idx: usize, active: bool },
     NewTabButton,
     WindowButton(IntegratedTitleButton),
@@ -427,9 +429,17 @@ impl TabBarState {
         pane_info: &[PaneInformation],
         colors: Option<&TabBarColors>,
         config: &ConfigHandle,
-        left_status: &str,
-        right_status: &str,
+        left_status: &[String],
+        right_status: &[String],
     ) -> Self {
+        // Row 0 is the row the single-row tab bar has always had, and is the
+        // only one the retro tab bar can draw. Any further rows exist only
+        // when the fancy tab bar is showing more than one.
+        let first = |v: &[String]| v.first().cloned().unwrap_or_default();
+        let left_status_first = first(left_status);
+        let right_status_first = first(right_status);
+        let left_status = left_status;
+        let right_status = right_status;
         let colors = colors.cloned().unwrap_or_else(TabBarColors::default);
 
         let active_cell_attrs = colors.active_tab().as_cell_attributes();
@@ -531,10 +541,11 @@ impl TabBarState {
             Self::integrated_title_buttons(mouse_x, &mut x, config, &mut items, &mut line, &colors);
         }
 
-        let left_status_line = parse_status_text(left_status, black_cell.attrs().clone());
+        let left_status_line =
+            parse_status_text(&left_status_first, black_cell.attrs().clone());
         if left_status_line.len() > 0 {
             items.push(TabEntry {
-                item: TabBarItem::LeftStatus,
+                item: TabBarItem::LeftStatus(0),
                 title: left_status_line.clone(),
                 x,
                 width: left_status_line.len(),
@@ -671,9 +682,10 @@ impl TabBarState {
 
         let status_space_available = title_width.saturating_sub(x);
 
-        let mut right_status_line = parse_status_text(right_status, black_cell.attrs().clone());
+        let mut right_status_line =
+            parse_status_text(&right_status_first, black_cell.attrs().clone());
         items.push(TabEntry {
-            item: TabBarItem::RightStatus,
+            item: TabBarItem::RightStatus(0),
             title: right_status_line.clone(),
             x,
             width: status_space_available,
@@ -694,6 +706,32 @@ impl TabBarState {
         {
             x = title_width;
             Self::integrated_title_buttons(mouse_x, &mut x, config, &mut items, &mut line, &colors);
+        }
+
+        // Status for the rows below the first. These have no place in `line`,
+        // which is the single line the retro tab bar draws, so they are carried
+        // as zero-width entries that only the fancy tab bar reads.
+        for (row, status) in left_status.iter().enumerate().skip(1) {
+            if status.is_empty() {
+                continue;
+            }
+            items.push(TabEntry {
+                item: TabBarItem::LeftStatus(row),
+                title: parse_status_text(status, black_cell.attrs().clone()),
+                x: 0,
+                width: 0,
+            });
+        }
+        for (row, status) in right_status.iter().enumerate().skip(1) {
+            if status.is_empty() {
+                continue;
+            }
+            items.push(TabEntry {
+                item: TabBarItem::RightStatus(row),
+                title: parse_status_text(status, black_cell.attrs().clone()),
+                x: 0,
+                width: 0,
+            });
         }
 
         Self {

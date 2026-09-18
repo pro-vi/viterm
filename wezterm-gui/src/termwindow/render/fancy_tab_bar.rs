@@ -68,9 +68,12 @@ impl crate::TermWindow {
             .cloned()
             .unwrap_or_else(TabBarColors::default);
 
-        let mut left_status = vec![];
+        let rows = self.config.tab_bar_rows.max(1);
+        // One left and one right status bucket per row; only the first is
+        // reachable when the bar is a single row.
+        let mut row_left_status: Vec<Vec<Element>> = vec![vec![]; rows];
+        let mut row_right_status: Vec<Vec<Element>> = vec![vec![]; rows];
         let mut left_eles = vec![];
-        let mut right_eles = vec![];
         let bar_colors = ElementColors {
             border: BorderColor::default(),
             bg: if self.focused.is_some() {
@@ -112,7 +115,7 @@ impl crate::TermWindow {
             let active_tab = colors.active_tab();
 
             match item.item {
-                TabBarItem::RightStatus | TabBarItem::LeftStatus | TabBarItem::None => element
+                TabBarItem::RightStatus(_) | TabBarItem::LeftStatus(_) | TabBarItem::None => element
                     .item_type(UIItemType::TabBar(TabBarItem::None))
                     .line_height(Some(1.75))
                     .margin(BoxDimension {
@@ -303,7 +306,6 @@ impl crate::TermWindow {
                 _ => 0.,
             })
             .sum();
-        let rows = self.config.tab_bar_rows.max(1);
         // Each row gets its own share of the window width, so a tab may be
         // that many times wider than it would be on a single row.
         let tabs_per_row = (num_tabs / rows as f32).ceil().max(1.);
@@ -319,7 +321,7 @@ impl crate::TermWindow {
             && self.config.integrated_title_button_style == IntegratedTitleButtonStyle::MacOsNative
             && !self.window_state.contains(window::WindowState::FULL_SCREEN)
         {
-            left_status.push(
+            row_left_status[0].push(
                 Element::new(&font, ElementContent::Text("".to_string())).margin(BoxDimension {
                     left: Dimension::Cells(4.0), // FIXME: determine exact width of macos ... buttons
                     right: Dimension::Cells(0.),
@@ -331,15 +333,24 @@ impl crate::TermWindow {
 
         for item in items {
             match item.item {
-                TabBarItem::LeftStatus => left_status.push(item_to_elem(item)),
-                TabBarItem::None | TabBarItem::RightStatus => right_eles.push(item_to_elem(item)),
+                TabBarItem::LeftStatus(row) => {
+                    if let Some(bucket) = row_left_status.get_mut(row) {
+                        bucket.push(item_to_elem(item));
+                    }
+                }
+                TabBarItem::RightStatus(row) => {
+                    if let Some(bucket) = row_right_status.get_mut(row) {
+                        bucket.push(item_to_elem(item));
+                    }
+                }
+                TabBarItem::None => row_right_status[0].push(item_to_elem(item)),
                 TabBarItem::WindowButton(_) => {
                     if self.config.integrated_title_button_alignment
                         == IntegratedTitleButtonAlignment::Left
                     {
                         left_eles.push(item_to_elem(item))
                     } else {
-                        right_eles.push(item_to_elem(item))
+                        row_right_status[0].push(item_to_elem(item))
                     }
                 }
                 TabBarItem::Tab { tab_idx, active } => {
@@ -399,14 +410,12 @@ impl crate::TermWindow {
         };
 
         let content = if rows > 1 {
-            // Spread the tabs over the rows, keeping their order. The status
-            // areas belong to the first row; the remaining rows hold tabs
-            // alone. A Block child starts a new line in the box model, so one
-            // Block per row is what stacks them.
+            // Spread the tabs over the rows, keeping their order. A Block child
+            // starts a new line in the box model, so one Block per row is what
+            // stacks them. Each row carries its own status areas, so a second
+            // row can show status of its own beside its tabs.
             let per_row = (left_eles.len() + rows - 1) / rows;
             let mut remaining = left_eles;
-            let mut left_status = Some(left_status);
-            let mut right_eles = Some(right_eles);
             let row_height = tab_bar_height / rows as f32;
             let mut row_eles = vec![];
 
@@ -419,14 +428,12 @@ impl crate::TermWindow {
                 let mine: Vec<Element> = remaining.drain(0..take).collect();
 
                 let mut row_children = vec![];
-                if row == 0 {
-                    let status = left_status.take().unwrap_or_default();
-                    if !status.is_empty() {
-                        row_children.push(
-                            Element::new(&font, ElementContent::Children(status))
-                                .colors(bar_colors.clone()),
-                        );
-                    }
+                let left = std::mem::take(&mut row_left_status[row]);
+                if !left.is_empty() {
+                    row_children.push(
+                        Element::new(&font, ElementContent::Children(left))
+                            .colors(bar_colors.clone()),
+                    );
                 }
                 row_children.push(tab_run(
                     mine,
@@ -436,14 +443,12 @@ impl crate::TermWindow {
                         Dimension::Cells(0.5)
                     },
                 ));
-                if row == 0 {
+                let right = std::mem::take(&mut row_right_status[row]);
+                if !right.is_empty() {
                     row_children.push(
-                        Element::new(
-                            &font,
-                            ElementContent::Children(right_eles.take().unwrap_or_default()),
-                        )
-                        .colors(bar_colors.clone())
-                        .float(Float::Right),
+                        Element::new(&font, ElementContent::Children(right))
+                            .colors(bar_colors.clone())
+                            .float(Float::Right),
                     );
                 }
 
@@ -464,18 +469,22 @@ impl crate::TermWindow {
         } else {
             let mut children = vec![];
 
-            if !left_status.is_empty() {
+            let left = std::mem::take(&mut row_left_status[0]);
+            if !left.is_empty() {
                 children.push(
-                    Element::new(&font, ElementContent::Children(left_status))
+                    Element::new(&font, ElementContent::Children(left))
                         .colors(bar_colors.clone()),
                 );
             }
 
             children.push(tab_run(left_eles, left_padding));
             children.push(
-                Element::new(&font, ElementContent::Children(right_eles))
-                    .colors(bar_colors.clone())
-                    .float(Float::Right),
+                Element::new(
+                    &font,
+                    ElementContent::Children(std::mem::take(&mut row_right_status[0])),
+                )
+                .colors(bar_colors.clone())
+                .float(Float::Right),
             );
 
             ElementContent::Children(children)
