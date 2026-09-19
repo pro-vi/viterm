@@ -2,8 +2,10 @@
 
 Units that have no branch yet. `PATCHES.md` holds every unit that has one; an
 entry leaves this file at the moment `git switch -c unit/<slug>` is run. The
-first six are in the order the plan of 2026-09-06 picks them up; the last two
-came later and have no place in that order yet. The `notes:` lines name
+entries the plan of 2026-09-06 proposed keep its relative order, minus
+`mux-socket-buffers`, which has a branch and so lives in `PATCHES.md`.
+`viewer-selection-isolation`, `flash-message` and `mux-tab-get-index` came
+later and have no place in that order yet. The `notes:` lines name
 investigation notes in `.inbox/`, which is local to this machine and not part
 of this repo.
 
