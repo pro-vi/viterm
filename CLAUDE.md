@@ -7,8 +7,9 @@ branch, open a pull request against wezterm/wezterm — describes upstream's
 process, not this one. Read this file first.
 
 If you are reading this, you are on the `build` branch. This file, `PATCHES.md`
-and `.inbox/` exist only there, on purpose: a unit branch must contain nothing
-but its own change.
+and `BACKLOG.md` exist only there, on purpose: a unit branch must contain nothing
+but its own change. `.inbox/` holds local investigation notes and is deliberately
+untracked.
 
 ## The four kinds of branch
 
@@ -19,9 +20,12 @@ but its own change.
 | `build` | `upstream/main` plus a merge of every active unit, plus the fork-only files. **Every local build comes from here.** |
 | everything else | upstream's own branches, fetched. None of them is ours. |
 
-`PATCHES.md` is the ledger: one row per unit, with its side, status, the files
-it touches, why it exists and the test that proves it. A unit without a row in
-that file is a unit nobody will be able to judge in six months.
+`PATCHES.md` is the ledger: one row per unit that has a branch, with its base,
+side, status, the files it touches, why it exists and the test that proves it. A
+unit without a row in that file is a unit nobody will be able to judge in six
+months. `BACKLOG.md` holds the units that have no branch yet; an entry moves from
+there to the ledger at the moment its branch is created, so the ledger can always
+be checked against `git branch --list 'unit/*'`.
 
 ## Adding a change
 
@@ -30,7 +34,8 @@ It is: *does this need another unit's code in order to compile and work?*
 
 - **No** — and this is the usual answer, even for a change on the same subject
   as an existing unit: branch from `upstream/main`.
-- **Yes** — branch from the unit it needs, and say so in that unit's ledger row.
+- **Yes** — branch from the unit it needs, and name that unit in the `base`
+  column of the new unit's ledger row.
   `unit/tab-bar-row-status` is the example: there is no second row to put a
   status on without `unit/tab-bar-rows`.
 
@@ -48,7 +53,7 @@ Two rules that are easy to break by accident:
 
 - **Do not commit to `build` directly.** A change that exists only on `build`
   can never be sent upstream and will be lost the next time `build` is
-  reassembled. Fork-only files (`CLAUDE.md`, `PATCHES.md`, `.inbox/`) are the
+  reassembled. Fork-only files (`CLAUDE.md`, `PATCHES.md`, `BACKLOG.md`) are the
   sole exception.
 - **Do not build from a unit branch.** Its binary is missing every other unit,
   so what you observe is not what the machine runs.
@@ -105,14 +110,25 @@ GUI can clear an "agent is waiting" state before the human ever sees it.
 ```bash
 git fetch upstream
 git switch main && git merge --ff-only upstream/main
-git rebase upstream/main unit/<each>          # each unit, on its own
+git rebase upstream/main unit/<each>          # each unit whose base is upstream/main
+                                               # and that no other unit is based on
+git rebase --update-refs upstream/main unit/<leaf>   # a stack: rebase its last unit,
+                                               # the units under it move with it
 git switch build                               # reassemble: reset to upstream/main,
                                                # re-merge every unit, restore the
                                                # fork-only files
 ```
 
+A unit based on another unit must never be rebased on its own: that gives it a
+private copy of its base's commit, which no longer follows the base when the
+base is fixed. When a base unit is amended, move what sits on it with
+`git rebase --onto unit/<base> <old tip of base> unit/<slug>`. Units are merged
+into `build` base first. A stacked unit can go upstream only after its base has
+landed, at which point its base becomes `upstream/main`.
+
 `git cherry upstream/main unit/<slug>` says when a unit has landed upstream
-verbatim and can be retired; a unit reworked upstream needs the ledger edited
+verbatim and can be retired (for a stacked unit it lists the base's commits
+first; the unit's own commit is the last line); a unit reworked upstream needs the ledger edited
 by hand.
 
 ## Where the rest of the story is
@@ -120,4 +136,5 @@ by hand.
 - `PATCHES.md` — what each unit is and how it was proven.
 - `.inbox/` — the investigations behind the units, notably the 2026-09-06 note
   tracing the ViTerm freeze to the focus-echo loop and proposing the unit list.
-  These are notes, not rules; this file holds the rules.
+  These are notes, not rules; this file holds the rules. They stay on this
+  machine, untracked, because they name hostnames, session ids and pids.
