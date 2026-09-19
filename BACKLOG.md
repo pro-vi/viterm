@@ -40,13 +40,21 @@ of this repo.
 - why: A `ClientPane` starts with an empty `user_vars` map and learns only from live `Alert::SetUserVar`, so state carried in user vars is missing after every GUI relaunch. Send each pane's current vars when a client attaches it
 - notes: `2026-09-06-viterm-freeze-fork-plan.md`
 
+### `viewer-selection-isolation`
+
+- side: protocol
+- state: proposed
+- needs: GUI and mux server built from the same commit; the GUI's version check requires equal codec versions, so every GUI and the mux server move together. Ships before `tab-order-over-protocol`. Owed first and unrun: the two-GUI reproduction, on a throwaway mux server rather than `human-main`, since a second GUI on the live one clears attention markers before the human sees them
+- why: Focusing a pane in one GUI moves every other attached GUI's active tab, and a GUI receives its own focus echo. `advise_focus` sends `SetFocusedPane`, the server writes the shared `active_tab_idx` and broadcasts `PaneFocused` without an origin filter, and every client applies it. Suppressing the broadcast is not sufficient: `sync_with_pane_tree` resets the active pane from the server's `is_active_pane` on every pane-list refresh, for tabs the client already has. A viewer reports where it is; only an addressed command changes where another viewer is
+- notes: `2026-09-19-mux-viewer-selection-and-tab-order.md`
+
 ### `tab-order-over-protocol`
 
 - side: protocol
 - state: proposed
-- needs: GUI and mux server built from the same commit. Marked optional and the largest in the plan
-- why: A reordered tab reverts on reattach, because `codec` has no tab-move message
-- notes: `2026-09-06-viterm-freeze-fork-plan.md`
+- needs: GUI and mux server built from the same commit. Best built after `viewer-selection-isolation`, on the invariant that a reorder never changes any viewer's selection
+- why: A reordered tab reverts on reattach, because `codec` has no tab-move message. The server does hold an order; nothing can permute it. Two constraints found since this entry was written: an existing client is not re-ordered by a resync, since the pane-list loop only pushes a tab it does not already have, so the order needs its own apply path; and a local window can hold tabs from several remote windows, so a move names a remote window and a remote tab, and a move across two such groups is not a canonical reorder at all
+- notes: `2026-09-19-mux-viewer-selection-and-tab-order.md`, `2026-09-06-viterm-freeze-fork-plan.md`
 
 ### `vertical-tabs`
 
