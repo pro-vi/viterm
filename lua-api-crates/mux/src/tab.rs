@@ -23,6 +23,17 @@ impl UserData for MuxTab {
             }))
         });
         methods.add_method("tab_id", |_, this, _: ()| Ok(this.0));
+        methods.add_method("get_index", |_, this, _: ()| {
+            let mux = get_mux()?;
+            let _tab = this.resolve(&mux)?;
+            let Some(window_id) = mux.window_containing_tab(this.0) else {
+                return Ok(None);
+            };
+            let window = mux
+                .get_window(window_id)
+                .ok_or_else(|| mlua::Error::external(format!("window {window_id} not found")))?;
+            Ok(window.get_tab_idx_for_id(this.0))
+        });
         methods.add_method("window", |_, this, _: ()| {
             let mux = get_mux()?;
             for window_id in mux.iter_windows() {
