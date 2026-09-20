@@ -160,6 +160,10 @@ As features stabilize some brief notes about them will accumulate here.
   `CTRL-u` to kill back to the start of the line. Thanks to @bew! #8013
 
 #### Fixed
+* mux: `wezterm cli split-pane --move-pane-id` now translates the pane id when
+  splitting a multiplexed pane, so the server moves the intended pane instead
+  of looking up the GUI-local id. The existing local ClientPane is reparented
+  rather than wrapping the same remote pane twice.
 * macOS: Fix window border when opacity<1 and shadow enabled.
   Thanks to @Adams-Galaxy! #8038 #5158
 * perf: Terminal images were hashed three times each on the transmit path; the sha256
