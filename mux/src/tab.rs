@@ -2586,10 +2586,8 @@ mod test {
             .unwrap();
         pane_1.resize(split.first).unwrap();
 
-        // Act: switch the active pane back to pane 1, requesting NO mux notification.
         tab.set_active_pane_with_notify(&pane_1, NotifyMux::No);
 
-        // Assert: the active pane changed, but not a single PaneFocused was emitted.
         assert_eq!(Vec::<PaneId>::new(), *notified_panes.lock());
         assert_eq!(1, tab.get_active_pane().unwrap().pane_id());
 
@@ -2639,11 +2637,8 @@ mod test {
             .unwrap();
         pane_1.resize(split.first).unwrap();
 
-        // Act: switch the active pane back to pane 1 via the default helper,
-        // which requests a mux notification.
         tab.set_active_pane(&pane_1);
 
-        // Assert: the active pane changed and exactly one PaneFocused was emitted.
         assert_eq!(vec![1], *notified_panes.lock());
         assert_eq!(1, tab.get_active_pane().unwrap().pane_id());
 
