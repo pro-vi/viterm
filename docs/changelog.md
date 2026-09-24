@@ -77,6 +77,9 @@ As features stabilize some brief notes about them will accumulate here.
   easier to spot the remaining candidates. Thanks to @mr-felixoid and @bew! #7752
 
 #### New
+* [tab:get_index()](config/lua/MuxTab/get_index.md) returns the 0-based index
+  of a mux tab in its window, matching `window:tabs_with_info().index` and
+  `TabInformation.tab_index`.
 * [command_palette_line_height](config/lua/config/command_palette_line_height.md)
   option to scale the vertical spacing of rows in the command palette,
   independently of [line_height](config/lua/config/line_height.md) which is for terminal cells only.
