@@ -873,35 +873,81 @@ impl Domain for ClientDomain {
 
         let mux = Mux::get();
 
-        let tab = mux
-            .get_tab(tab_id)
-            .ok_or_else(|| anyhow!("tab_id {} is invalid", tab_id))?;
         let local_pane = mux
             .get_pane(pane_id)
             .ok_or_else(|| anyhow!("pane_id {} is invalid", pane_id))?;
-        let pane = local_pane
+        let remote_pane_id = local_pane
             .downcast_ref::<ClientPane>()
-            .ok_or_else(|| anyhow!("pane_id {} is not a ClientPane", pane_id))?;
+            .ok_or_else(|| anyhow!("pane_id {} is not a ClientPane", pane_id))?
+            .remote_pane_id;
 
-        let (command, command_dir, move_pane_id) = match source {
+        let (command, command_dir, remote_move_pane_id) = match source {
             SplitSource::Spawn {
                 command,
                 command_dir,
             } => (command, command_dir, None),
-            SplitSource::MovePane(move_pane_id) => (None, None, Some(move_pane_id)),
+            SplitSource::MovePane(move_pane_id) => {
+                let local_move = mux
+                    .get_pane(move_pane_id)
+                    .ok_or_else(|| anyhow!("pane_id {} is invalid", move_pane_id))?;
+                let remote_move_pane_id = local_move
+                    .downcast_ref::<ClientPane>()
+                    .ok_or_else(|| anyhow!("pane_id {} is not a ClientPane", move_pane_id))?
+                    .remote_pane_id;
+                (None, None, Some(remote_move_pane_id))
+            }
         };
 
         let result = inner
             .client
             .split_pane(SplitPane {
                 domain: SpawnTabDomain::CurrentPaneDomain,
-                pane_id: pane.remote_pane_id,
+                pane_id: remote_pane_id,
                 split_request,
                 command,
                 command_dir,
-                move_pane_id,
+                move_pane_id: remote_move_pane_id,
             })
             .await?;
+
+        if let Some(remote_move) = remote_move_pane_id {
+            // The server already moved the pane. Reparent the existing local
+            // wrapper; do not wrap it again and do not resync (resync leaves
+            // the source tab holding the same ClientPane).
+            let local_move_id = inner
+                .remote_to_local_pane_id(remote_move)
+                .ok_or_else(|| anyhow!("remote pane {remote_move} has no local mapping"))?;
+            let (_domain, _window, src_tab_id) = mux
+                .resolve_pane_id(local_move_id)
+                .ok_or_else(|| anyhow!("pane {local_move_id} not found"))?;
+            let src_tab = mux
+                .get_tab(src_tab_id)
+                .ok_or_else(|| anyhow!("Invalid tab id {src_tab_id}"))?;
+            let moved = src_tab
+                .remove_pane(local_move_id)
+                .ok_or_else(|| anyhow!("pane {local_move_id} not found in its containing tab!?"))?;
+            if src_tab.is_dead() {
+                mux.remove_tab(src_tab.tab_id());
+            }
+
+            let tab = mux
+                .get_tab(tab_id)
+                .ok_or_else(|| anyhow!("tab_id {tab_id} is invalid"))?;
+            let pane_index = match tab
+                .iter_panes()
+                .iter()
+                .find(|p| p.pane.pane_id() == pane_id)
+            {
+                Some(p) => p.index,
+                None => anyhow::bail!("invalid pane id {pane_id}"),
+            };
+            tab.split_and_insert(pane_index, split_request, Arc::clone(&moved))?;
+            return Ok(moved);
+        }
+
+        let tab = mux
+            .get_tab(tab_id)
+            .ok_or_else(|| anyhow!("tab_id {} is invalid", tab_id))?;
 
         let pane: Arc<dyn Pane> = Arc::new(ClientPane::new(
             &inner,
