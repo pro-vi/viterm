@@ -53,8 +53,8 @@ Two rules that are easy to break by accident:
 
 - **Do not commit to `build` directly.** A change that exists only on `build`
   can never be sent upstream and will be lost the next time `build` is
-  reassembled. Fork-only files (`CLAUDE.md`, `PATCHES.md`, `BACKLOG.md`,
-  `docs/plans/`) are the sole exception. Engine patches land on `build` only as
+  reassembled. Fork-only files (`AGENTS.md`, `CLAUDE.md`, `PATCHES.md`,
+  `BACKLOG.md`, `docs/plans/`, `fork/`) are the sole exception. Engine patches land on `build` only as
   the contents of the `--no-ff` merge commits, conflict resolution included —
   never as a follow-up commit after the merge.
 - **Do not build from a unit branch.** Its binary is missing every other unit,
@@ -83,9 +83,8 @@ conflict forges a fake `base`.
 
 ## Toggling a unit
 
-Not a runtime flag. Reassemble: reset `build` to current `upstream/main`, merge
-every unit still wanted, restore fork-only files, edit `PATCHES.md` (drop or
-mark the row). Rebuild the engine. A stacked leaf cannot stay if its base is
+Not a runtime flag. Edit `PATCHES.md` (drop the row, or mark its status "not
+merged"), commit that on `build`, then rebuild `build` (below) and the engine. A stacked leaf cannot stay if its base is
 dropped. Config defaults (`tab_bar_rows = 1`) turn the behavior off; they do
 not drop the merge.
 
@@ -93,7 +92,10 @@ Reconstruct joins on the go. Do not merge an old `build` tip back in to keep
 conflict resolutions — that brings dropped units and stale main. The previous
 merge commit remains reachable (`reflog`, old SHA); `git show <old-merge>:path`
 is a hint only. If hunks changed, re-evaluate. Do not enable `git rerere` as
-policy.
+policy. The one exception is exact identity: when both sides of every
+conflicted file are byte-identical to the old merge's two parents, the old
+result is the answer, and `fork/reassemble.sh` takes it and says so in the
+merge message.
 
 ## Building and installing
 
@@ -151,11 +153,30 @@ git rebase upstream/main unit/<each>          # each unit whose base is upstream
                                                # and that no other unit is based on
 git rebase --update-refs upstream/main unit/<leaf>   # a stack: rebase its last unit,
                                                # the units under it move with it
-git switch build
-git reset --hard upstream/main                 # never merge the old build tip back in
-git merge --no-ff unit/<still wanted>          # base-first only when PATCHES base is a unit
-# restore fork-only files; edit PATCHES.md; reconstruct joins in the merge commits
 ```
+
+Rebase each unit in a worktree, not in this checkout, so `build` stays checked
+out here. Then rebuild `build` with `fork/reassemble.sh`, which reads the unit
+list and order from `PATCHES.md` and never touches `build` until `promote`:
+
+```bash
+fork/reassemble.sh check      # every unit found, and none behind its base
+fork/reassemble.sh start      # build-next = upstream/main + each unit, --no-ff
+                              # a new conflict stops it; resolve, commit, run the
+                              # `continue` command it prints
+fork/reassemble.sh compare    # the tree build-next would change, file by file
+git switch build && fork/reassemble.sh promote
+git push --force-with-lease=unit/<slug>:<old sha> origin unit/<slug>   # each rebased unit
+git push --force-with-lease=build:<old sha> origin build               # promote prints this
+```
+
+Read `compare` before promoting. With `upstream/main` and the units unchanged,
+the result must be identical; any difference is a fix that lived only in an old
+merge commit. Move it into the unit it belongs to (`git commit --fixup` on that
+unit, then an autosquash rebase with `--update-refs`) and rebuild again. When
+upstream or a unit did change, every line of the difference should be
+explained by that change. Then rebuild the engine and prove it as the units'
+rows say.
 
 A unit based on another unit must never be rebased on its own: that gives it a
 private copy of its base's commit, which no longer follows the base when the
