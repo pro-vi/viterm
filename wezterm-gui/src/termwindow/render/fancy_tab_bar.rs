@@ -475,13 +475,57 @@ impl crate::TermWindow {
                 .zindex(1)
         };
 
+        let border = self.get_os_border();
+        let layout_context = LayoutContext {
+            height: DimensionContext {
+                dpi: self.dimensions.dpi as f32,
+                pixel_max: self.dimensions.pixel_height as f32,
+                pixel_cell: metrics.cell_size.height as f32,
+            },
+            width: DimensionContext {
+                dpi: self.dimensions.dpi as f32,
+                pixel_max: self.dimensions.pixel_width as f32,
+                pixel_cell: metrics.cell_size.width as f32,
+            },
+            bounds: euclid::rect(
+                border.left.get() as f32,
+                0.,
+                self.dimensions.pixel_width as f32 - (border.left + border.right).get() as f32,
+                tab_bar_height,
+            ),
+            metrics: &metrics,
+            gl_state: self.render_state.as_ref().unwrap(),
+            zindex: 10,
+        };
+
         let content = if rows > 1 {
-            // Spread the tabs over the rows, keeping their order. A Block child
-            // starts a new line in the box model, so one Block per row is what
-            // stacks them. Each row carries its own status areas, so a second
-            // row can show status of its own beside its tabs.
-            let per_row = (left_eles.len() + rows - 1) / rows;
+            // Fill the rows in order: each row takes tabs while their laid-out
+            // widths fit beside that row's status areas, and the last row takes
+            // whatever is left. A Block child starts a new line in the box
+            // model, so one Block per row is what stacks them. Each row carries
+            // its own status areas, so a second row can show status of its own
+            // beside its tabs. max_tab_width is sized so that `rows` rows hold
+            // every tab, so filling never needs more rows than an even split.
+            let measure = |ele: Element| -> anyhow::Result<f32> {
+                Ok(self
+                    .compute_element(&layout_context, &ele)?
+                    .bounds
+                    .width())
+            };
+            let tab_widths = left_eles
+                .iter()
+                .map(|ele| measure(ele.clone()))
+                .collect::<anyhow::Result<Vec<f32>>>()?;
+            let row_padding = |row: usize| {
+                if row == 0 {
+                    left_padding
+                } else {
+                    Dimension::Cells(0.5)
+                }
+            };
+
             let mut remaining = left_eles;
+            let mut next_tab = 0;
             let row_height = tab_bar_height / rows as f32;
             let mut row_eles = vec![];
 
@@ -489,9 +533,31 @@ impl crate::TermWindow {
                 let take = if row + 1 == rows {
                     remaining.len()
                 } else {
-                    per_row.min(remaining.len())
+                    let status_width = |status: &Vec<Element>| -> anyhow::Result<f32> {
+                        if status.is_empty() {
+                            Ok(0.)
+                        } else {
+                            measure(Element::new(&font, ElementContent::Children(status.clone())))
+                        }
+                    };
+                    let available = layout_context.bounds.width()
+                        - row_padding(row).evaluate_as_pixels(layout_context.width)
+                        - status_width(&row_left_status[row])?
+                        - status_width(&row_right_status[row])?;
+                    let mut used = 0.;
+                    let mut take = 0;
+                    // A row always takes at least one tab, so a tab wider than
+                    // its row cannot hold every later tab back to the last row.
+                    while take < remaining.len()
+                        && (take == 0 || used + tab_widths[next_tab + take] <= available)
+                    {
+                        used += tab_widths[next_tab + take];
+                        take += 1;
+                    }
+                    take
                 };
                 let mine: Vec<Element> = remaining.drain(0..take).collect();
+                next_tab += take;
 
                 let mut row_children = vec![];
                 let left = std::mem::take(&mut row_left_status[row]);
@@ -501,14 +567,7 @@ impl crate::TermWindow {
                             .colors(bar_colors.clone()),
                     );
                 }
-                row_children.push(tab_run(
-                    mine,
-                    if row == 0 {
-                        left_padding
-                    } else {
-                        Dimension::Cells(0.5)
-                    },
-                ));
+                row_children.push(tab_run(mine, row_padding(row)));
                 let right = std::mem::take(&mut row_right_status[row]);
                 if !right.is_empty() {
                     row_children.push(
@@ -564,32 +623,7 @@ impl crate::TermWindow {
             .vertical_align(tab_vertical_alignment)
             .colors(bar_colors);
 
-        let border = self.get_os_border();
-
-        let mut computed = self.compute_element(
-            &LayoutContext {
-                height: DimensionContext {
-                    dpi: self.dimensions.dpi as f32,
-                    pixel_max: self.dimensions.pixel_height as f32,
-                    pixel_cell: metrics.cell_size.height as f32,
-                },
-                width: DimensionContext {
-                    dpi: self.dimensions.dpi as f32,
-                    pixel_max: self.dimensions.pixel_width as f32,
-                    pixel_cell: metrics.cell_size.width as f32,
-                },
-                bounds: euclid::rect(
-                    border.left.get() as f32,
-                    0.,
-                    self.dimensions.pixel_width as f32 - (border.left + border.right).get() as f32,
-                    tab_bar_height,
-                ),
-                metrics: &metrics,
-                gl_state: self.render_state.as_ref().unwrap(),
-                zindex: 10,
-            },
-            &tabs,
-        )?;
+        let mut computed = self.compute_element(&layout_context, &tabs)?;
 
         computed.translate(euclid::vec2(
             0.,
