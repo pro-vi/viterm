@@ -229,7 +229,7 @@ cmd_promote() {
   git reset -q --hard "$TARGET"
   git branch -D -q "$TARGET"
   say "build moved from $old to $(git rev-parse --short HEAD); the old tip stays in the reflog."
-  say "Publish with: git push --force-with-lease=build:$old origin build"
+  say "Publish with: git push --force-with-lease=build:$(git rev-parse origin/build) origin build"
 }
 
 case "${1:-}" in
