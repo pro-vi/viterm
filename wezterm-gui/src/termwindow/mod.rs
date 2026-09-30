@@ -977,8 +977,14 @@ impl TermWindow {
                 Ok(true)
             }
             WindowEvent::AdviseModifiersLedStatus(modifiers, leds) => {
-                self.current_modifier_and_leds = (modifiers, leds);
-                self.update_title();
+                // This arrives on every modifier press and release. The tab
+                // bar does not read the modifier state; only
+                // `window:keyboard_modifiers()` does, so a change needs a
+                // status update, not a tab bar rebuild.
+                if self.current_modifier_and_leds != (modifiers, leds) {
+                    self.current_modifier_and_leds = (modifiers, leds);
+                    self.schedule_status_update();
+                }
                 window.invalidate();
                 Ok(true)
             }
