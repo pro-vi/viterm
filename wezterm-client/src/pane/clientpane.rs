@@ -405,6 +405,7 @@ impl Pane for ClientPane {
 
             // Invalidate any cached rows on a resize
             inner.make_all_stale();
+            metrics::counter!("mux.client.send.Resize").increment(1);
 
             let client = Arc::clone(&self.client);
             let remote_pane_id = self.remote_pane_id;

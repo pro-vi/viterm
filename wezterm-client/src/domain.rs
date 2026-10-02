@@ -475,8 +475,11 @@ impl ClientDomain {
 
     pub async fn resync(&self) -> anyhow::Result<()> {
         if let Some(inner) = self.inner() {
+            let started = std::time::Instant::now();
             let panes = inner.client.list_panes().await?;
             Self::process_pane_list(inner, panes, None)?;
+            metrics::counter!("mux.client.resync").increment(1);
+            metrics::histogram!("mux.client.resync").record(started.elapsed());
         }
         Ok(())
     }
