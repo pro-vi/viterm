@@ -73,6 +73,7 @@ pub mod background;
 pub mod box_model;
 pub mod charselect;
 pub mod clipboard;
+mod event_timing;
 pub mod keyevent;
 pub mod modal;
 mod mouseevent;
@@ -419,6 +420,7 @@ pub struct TermWindow {
     window_background: Vec<LoadedBackgroundLayer>,
 
     current_modifier_and_leds: (Modifiers, KeyboardLedStatus),
+    event_timing: event_timing::EventTiming,
     current_mouse_buttons: Vec<MousePress>,
     current_mouse_capture: Option<MouseCapture>,
 
@@ -729,6 +731,7 @@ impl TermWindow {
             window_drag_position: None,
             current_mouse_event: None,
             current_modifier_and_leds: Default::default(),
+            event_timing: Default::default(),
             prev_cursor: PrevCursorPos::new(),
             last_scroll_info: RenderableDimensions::default(),
             tab_state: RefCell::new(HashMap::new()),
@@ -907,6 +910,17 @@ impl TermWindow {
     }
 
     fn dispatch_window_event(
+        &mut self,
+        event: WindowEvent,
+        window: &Window,
+    ) -> anyhow::Result<bool> {
+        self.event_timing.begin(&event);
+        let result = self.dispatch_window_event_impl(event, window);
+        self.event_timing.end();
+        result
+    }
+
+    fn dispatch_window_event_impl(
         &mut self,
         event: WindowEvent,
         window: &Window,
@@ -1990,6 +2004,15 @@ impl TermWindow {
     }
 
     fn update_title_impl(&mut self) {
+        let started = Instant::now();
+        self.update_title_impl_untimed();
+        let tabs = Mux::get()
+            .get_window(self.mux_window_id)
+            .map_or(0, |window| window.count_tabs());
+        self.event_timing.rebuilt(started.elapsed(), tabs);
+    }
+
+    fn update_title_impl_untimed(&mut self) {
         let mux = Mux::get();
         let window = match mux.get_window(self.mux_window_id) {
             Some(window) => window,
