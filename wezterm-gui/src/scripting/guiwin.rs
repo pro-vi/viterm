@@ -98,14 +98,26 @@ impl UserData for GuiWin {
         methods.add_method("get_appearance", |_, _, _: ()| {
             Ok(Connection::get().unwrap().get_appearance().to_string())
         });
-        methods.add_method("set_right_status", |_, this, status: String| {
-            this.window.notify(TermWindowNotif::SetRightStatus(status));
-            Ok(())
-        });
-        methods.add_method("set_left_status", |_, this, status: String| {
-            this.window.notify(TermWindowNotif::SetLeftStatus(status));
-            Ok(())
-        });
+        methods.add_method(
+            "set_right_status",
+            |_, this, (status, row): (String, Option<usize>)| {
+                // `row` counts from 1 to match tab_bar_rows; it is the row the
+                // status belongs to and defaults to the first.
+                let row = row.unwrap_or(1).saturating_sub(1);
+                this.window
+                    .notify(TermWindowNotif::SetRightStatus { status, row });
+                Ok(())
+            },
+        );
+        methods.add_method(
+            "set_left_status",
+            |_, this, (status, row): (String, Option<usize>)| {
+                let row = row.unwrap_or(1).saturating_sub(1);
+                this.window
+                    .notify(TermWindowNotif::SetLeftStatus { status, row });
+                Ok(())
+            },
+        );
         methods.add_async_method("get_dimensions", |_, this, _: ()| async move {
             let (tx, rx) = smol::channel::bounded(1);
             this.window.notify(TermWindowNotif::GetDimensions(tx));
