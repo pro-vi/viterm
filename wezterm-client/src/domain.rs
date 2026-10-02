@@ -17,6 +17,31 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use wezterm_term::TerminalSize;
 
+/// Set while a pane list from the server is being applied. A Resize sent in
+/// that window carries a size the server just reported, so it is counted
+/// separately from the sizes the GUI's own layout produces.
+static APPLYING_PANE_LIST: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+struct ApplyingPaneList;
+
+impl ApplyingPaneList {
+    fn begin() -> Self {
+        APPLYING_PANE_LIST.store(true, std::sync::atomic::Ordering::Relaxed);
+        Self
+    }
+}
+
+impl Drop for ApplyingPaneList {
+    fn drop(&mut self) {
+        APPLYING_PANE_LIST.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+pub(crate) fn is_applying_pane_list() -> bool {
+    APPLYING_PANE_LIST.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub struct ClientInner {
     pub client: Client,
     pub local_domain_id: DomainId,
@@ -475,8 +500,11 @@ impl ClientDomain {
 
     pub async fn resync(&self) -> anyhow::Result<()> {
         if let Some(inner) = self.inner() {
+            let started = std::time::Instant::now();
             let panes = inner.client.list_panes().await?;
             Self::process_pane_list(inner, panes, None)?;
+            metrics::counter!("mux.client.resync").increment(1);
+            metrics::histogram!("mux.client.resync").record(started.elapsed());
         }
         Ok(())
     }
@@ -506,6 +534,7 @@ impl ClientDomain {
         panes: ListPanesResponse,
         mut primary_window_id: Option<WindowId>,
     ) -> anyhow::Result<()> {
+        let _applying = ApplyingPaneList::begin();
         let mux = Mux::get();
         log::debug!(
             "domain {}: ListPanes result {:#?}",
