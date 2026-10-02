@@ -48,6 +48,13 @@ pub struct ClientPane {
     user_vars: Mutex<HashMap<String, String>>,
     config: Mutex<Option<Arc<dyn TerminalConfiguration>>>,
     unseen_output: Mutex<bool>,
+    /// The size this client last asked the server to give this pane, or the
+    /// size the server reported when this client took it as the pane's own
+    /// (at creation and in `adopt_server_size`). `resize` sends only a size
+    /// that differs from it. The render dimensions are no guide: the server's
+    /// render updates overwrite them, so they can hold a size the server
+    /// reported after this client had already asked for another.
+    requested_size: Mutex<TerminalSize>,
     progress: Mutex<Progress>,
 }
 
@@ -128,9 +135,30 @@ impl ClientPane {
             mouse_grabbed: Mutex::new(false),
             ignore_next_kill: Mutex::new(false),
             unseen_output: Mutex::new(false),
+            requested_size: Mutex::new(size),
             user_vars: Mutex::new(HashMap::new()),
             config: Mutex::new(None),
             progress: Mutex::new(Progress::default()),
+        }
+    }
+
+    /// Takes a size the server reported as this pane's size, for a pane whose
+    /// tab took the server's pane tree. Nothing is sent: the server already
+    /// has this size.
+    pub fn adopt_server_size(&self, size: TerminalSize) {
+        *self.requested_size.lock() = size;
+        let render = self.renderable.lock();
+        let mut inner = render.inner.borrow_mut();
+        if inner.dimensions.cols != size.cols as usize
+            || inner.dimensions.viewport_rows != size.rows as usize
+            || inner.dimensions.pixel_width != size.pixel_width
+            || inner.dimensions.pixel_height != size.pixel_height
+        {
+            inner.dimensions.cols = size.cols as usize;
+            inner.dimensions.viewport_rows = size.rows as usize;
+            inner.dimensions.pixel_width = size.pixel_width;
+            inner.dimensions.pixel_height = size.pixel_height;
+            inner.make_all_stale();
         }
     }
 
@@ -396,45 +424,49 @@ impl Pane for ClientPane {
     }
 
     fn resize(&self, size: TerminalSize) -> anyhow::Result<()> {
+        // Released before the render lock below is taken.
+        {
+            let mut requested = self.requested_size.lock();
+            if requested.cols == size.cols
+                && requested.rows == size.rows
+                && requested.pixel_width == size.pixel_width
+                && requested.pixel_height == size.pixel_height
+            {
+                return Ok(());
+            }
+            *requested = size;
+        }
+
         let render = self.renderable.lock();
         let mut inner = render.inner.borrow_mut();
+        inner.dimensions.cols = size.cols as usize;
+        inner.dimensions.viewport_rows = size.rows as usize;
+        inner.dimensions.pixel_width = size.pixel_width;
+        inner.dimensions.pixel_height = size.pixel_height;
 
-        let cols = size.cols as usize;
-        let rows = size.rows as usize;
+        // Invalidate any cached rows on a resize
+        inner.make_all_stale();
 
-        if inner.dimensions.cols != cols
-            || inner.dimensions.viewport_rows != rows
-            || inner.dimensions.pixel_width != size.pixel_width
-            || inner.dimensions.pixel_height != size.pixel_height
-        {
-            inner.dimensions.cols = cols;
-            inner.dimensions.viewport_rows = rows;
-            inner.dimensions.pixel_width = size.pixel_width;
-            inner.dimensions.pixel_height = size.pixel_height;
-
-            // Invalidate any cached rows on a resize
-            inner.make_all_stale();
-            metrics::counter!("mux.client.send.Resize").increment(1);
-            if crate::domain::is_applying_pane_list() {
-                metrics::counter!("mux.client.send.Resize.in_resync").increment(1);
-            }
-
-            let client = Arc::clone(&self.client);
-            let remote_pane_id = self.remote_pane_id;
-            let remote_tab_id = self.remote_tab_id;
-            promise::spawn::spawn(async move {
-                client
-                    .client
-                    .resize(Resize {
-                        containing_tab_id: remote_tab_id,
-                        pane_id: remote_pane_id,
-                        size,
-                    })
-                    .await
-            })
-            .detach();
-            inner.update_last_send();
+        metrics::counter!("mux.client.send.Resize").increment(1);
+        if crate::domain::is_applying_pane_list() {
+            metrics::counter!("mux.client.send.Resize.in_resync").increment(1);
         }
+
+        let client = Arc::clone(&self.client);
+        let remote_pane_id = self.remote_pane_id;
+        let remote_tab_id = self.remote_tab_id;
+        promise::spawn::spawn(async move {
+            client
+                .client
+                .resize(Resize {
+                    containing_tab_id: remote_tab_id,
+                    pane_id: remote_pane_id,
+                    size,
+                })
+                .await
+        })
+        .detach();
+        inner.update_last_send();
         Ok(())
     }
 
