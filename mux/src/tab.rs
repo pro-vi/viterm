@@ -486,6 +486,32 @@ fn adjust_y_size(tree: &mut Tree, mut y_adjust: isize, cell_dimensions: &Termina
     }
 }
 
+/// Whether two pane trees hold the same panes split the same way, whatever
+/// their sizes.
+fn is_same_topology(a: &Tree, b: &Tree) -> bool {
+    match (a, b) {
+        (Tree::Empty, Tree::Empty) => true,
+        (Tree::Leaf(a), Tree::Leaf(b)) => a.pane_id() == b.pane_id(),
+        (
+            Tree::Node {
+                left: a_left,
+                right: a_right,
+                data: a_data,
+            },
+            Tree::Node {
+                left: b_left,
+                right: b_right,
+                data: b_data,
+            },
+        ) => {
+            a_data.as_ref().map(|d| d.direction) == b_data.as_ref().map(|d| d.direction)
+                && is_same_topology(a_left, b_left)
+                && is_same_topology(a_right, b_right)
+        }
+        _ => false,
+    }
+}
+
 fn apply_sizes_from_splits(tree: &Tree, size: &TerminalSize) {
     match tree {
         Tree::Empty => return,
@@ -552,7 +578,10 @@ impl Tab {
     /// PaneEntry, or to create a new Pane from that entry.
     /// make_pane is expected to add the pane to the mux if it creates
     /// a new pane, otherwise the pane won't poll/update in the GUI.
-    pub fn sync_with_pane_tree<F>(&self, size: TerminalSize, root: PaneNode, make_pane: F)
+    /// Applies a pane tree reported by the mux server. Returns true when it
+    /// has a different topology from this tab's tree; the caller then records
+    /// the reported size of each pane. See `TabInner::sync_with_pane_tree`.
+    pub fn sync_with_pane_tree<F>(&self, size: TerminalSize, root: PaneNode, make_pane: F) -> bool
     where
         F: FnMut(PaneEntry) -> Arc<dyn Pane>,
     {
@@ -775,7 +804,22 @@ impl TabInner {
         }
     }
 
-    fn sync_with_pane_tree<F>(&mut self, size: TerminalSize, root: PaneNode, mut make_pane: F)
+    /// Applies a pane tree reported by the mux server. The server's tree
+    /// decides which panes the tab holds, how they are split, which one is
+    /// active and which one is zoomed; the sizes are this client's. A tree
+    /// with this tab's topology leaves the local split sizes and tab size in
+    /// place, and a tree with another topology replaces the tab's tree, sizes
+    /// included. No pane is resized here: a resize would send the server's
+    /// own sizes back to it, and a size it reported may already lag behind a
+    /// resize this client has sent. When only the zoomed pane changed, the
+    /// local tab size is applied again under the new zoom state, which sends
+    /// only sizes this client chose. Returns true when the topology changed.
+    fn sync_with_pane_tree<F>(
+        &mut self,
+        size: TerminalSize,
+        root: PaneNode,
+        mut make_pane: F,
+    ) -> bool
     where
         F: FnMut(PaneEntry) -> Arc<dyn Pane>,
     {
@@ -786,6 +830,14 @@ impl TabInner {
 
         let before = self.layout_snapshot();
         let t = build_from_pane_tree(root.into_tree(), &mut active, &mut zoomed, &mut make_pane);
+        let topology_changed = !self
+            .pane
+            .as_ref()
+            .map_or(false, |local| is_same_topology(local, &t));
+        let zoom_changed = self.zoomed.as_ref().map(|pane| pane.pane_id())
+            != zoomed.as_ref().map(|pane| pane.pane_id());
+        // With an unchanged topology the panes are in the same order in both
+        // trees, so the index found in the reported tree holds in the local one.
         let mut cursor = t.cursor();
 
         self.active = 0;
@@ -812,22 +864,28 @@ impl TabInner {
                 }
             }
         }
-        self.pane.replace(cursor.tree());
+        let t = cursor.tree();
         self.zoomed = zoomed;
-        self.size = size;
-
-        self.apply_size(size);
+        if topology_changed {
+            self.pane.replace(t);
+            self.size = size;
+        } else if zoom_changed {
+            let size = self.size;
+            self.apply_size(size);
+        }
         if self.layout_snapshot() != before {
             Mux::try_get().map(|mux| mux.notify(MuxNotification::TabResized(self.id)));
         }
 
         log::debug!(
-            "sync tab: {:#?} zoomed: {} {:#?}",
+            "sync tab: {:#?} zoomed: {} topology changed: {} {:#?}",
             size,
             self.zoomed.is_some(),
+            topology_changed,
             self.iter_panes()
         );
         assert!(self.pane.is_some());
+        topology_changed
     }
 
     fn codec_pane_tree(&mut self) -> PaneNode {
@@ -2262,14 +2320,24 @@ mod test {
     struct FakePane {
         id: PaneId,
         size: Mutex<TerminalSize>,
+        resizes: std::sync::atomic::AtomicUsize,
     }
 
     impl FakePane {
         fn new(id: PaneId, size: TerminalSize) -> Arc<dyn Pane> {
+            Self::counting(id, size)
+        }
+
+        fn counting(id: PaneId, size: TerminalSize) -> Arc<FakePane> {
             Arc::new(Self {
                 id,
                 size: Mutex::new(size),
+                resizes: std::sync::atomic::AtomicUsize::new(0),
             })
+        }
+
+        fn resize_count(&self) -> usize {
+            self.resizes.load(std::sync::atomic::Ordering::SeqCst)
         }
     }
 
@@ -2336,6 +2404,8 @@ mod test {
         }
         fn resize(&self, size: TerminalSize) -> anyhow::Result<()> {
             *self.size.lock() = size;
+            self.resizes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         }
 
@@ -2366,6 +2436,176 @@ mod test {
         fn get_current_working_dir(&self, _policy: CachePolicy) -> Option<Url> {
             None
         }
+    }
+
+    fn term_size(cols: usize, rows: usize) -> TerminalSize {
+        TerminalSize {
+            rows,
+            cols,
+            pixel_width: cols * 10,
+            pixel_height: rows * 25,
+            dpi: 96,
+        }
+    }
+
+    fn reported_leaf(pane_id: PaneId, size: TerminalSize, zoomed: bool) -> PaneNode {
+        PaneNode::Leaf(PaneEntry {
+            window_id: 0,
+            tab_id: 0,
+            pane_id,
+            title: String::new(),
+            size,
+            working_dir: None,
+            is_active_pane: pane_id == 1,
+            is_zoomed_pane: zoomed,
+            workspace: "default".to_string(),
+            cursor_pos: StableCursorPosition::default(),
+            physical_top: 0,
+            top_row: 0,
+            left_col: 0,
+            tty_name: None,
+        })
+    }
+
+    fn reported_split(
+        left: PaneNode,
+        right: PaneNode,
+        first: TerminalSize,
+        second: TerminalSize,
+    ) -> PaneNode {
+        PaneNode::Split {
+            left: Box::new(left),
+            right: Box::new(right),
+            node: SplitDirectionAndSize {
+                direction: SplitDirection::Horizontal,
+                first,
+                second,
+            },
+        }
+    }
+
+    /// An 80x24 tab split left|right into panes 1 and 2, with the resize
+    /// counts of both panes back at zero.
+    fn split_tab() -> (Tab, Arc<FakePane>, Arc<FakePane>) {
+        let size = term_size(80, 24);
+        let tab = Tab::new(&size);
+        let one = FakePane::counting(1, size);
+        tab.assign_pane(&(Arc::clone(&one) as Arc<dyn Pane>));
+        let request = SplitRequest {
+            direction: SplitDirection::Horizontal,
+            ..Default::default()
+        };
+        let halves = tab.compute_split_size(0, request).unwrap();
+        let two = FakePane::counting(2, halves.second);
+        tab.split_and_insert(0, request, Arc::clone(&two) as Arc<dyn Pane>)
+            .unwrap();
+        one.resizes.store(0, std::sync::atomic::Ordering::SeqCst);
+        two.resizes.store(0, std::sync::atomic::Ordering::SeqCst);
+        (tab, one, two)
+    }
+
+    fn widths(tab: &Tab) -> Vec<(PaneId, usize, usize)> {
+        tab.iter_panes_ignoring_zoom()
+            .iter()
+            .map(|p| (p.pane.pane_id(), p.width, p.height))
+            .collect()
+    }
+
+    #[test]
+    fn resync_keeps_local_sizes() {
+        let (tab, one, two) = split_tab();
+        let before = widths(&tab);
+        let stale = term_size(49, 25);
+        let tree = reported_split(
+            reported_leaf(1, stale, false),
+            reported_leaf(2, stale, false),
+            stale,
+            stale,
+        );
+        let changed =
+            tab.sync_with_pane_tree(term_size(99, 25), tree, |entry| match entry.pane_id {
+                1 => Arc::clone(&one) as Arc<dyn Pane>,
+                _ => Arc::clone(&two) as Arc<dyn Pane>,
+            });
+        assert!(!changed, "the same panes split the same way");
+        assert_eq!(tab.get_size(), term_size(80, 24));
+        assert_eq!(widths(&tab), before);
+        assert_eq!((one.resize_count(), two.resize_count()), (0, 0));
+    }
+
+    #[test]
+    fn resync_adopts_new_topology_without_resize() {
+        let (tab, one, _two) = split_tab();
+        let three = FakePane::counting(3, term_size(40, 24));
+        let reported = term_size(40, 24);
+        let tree = reported_split(
+            reported_leaf(1, term_size(39, 24), false),
+            reported_leaf(3, reported, false),
+            term_size(39, 24),
+            reported,
+        );
+        let changed =
+            tab.sync_with_pane_tree(term_size(80, 24), tree, |entry| match entry.pane_id {
+                1 => Arc::clone(&one) as Arc<dyn Pane>,
+                _ => Arc::clone(&three) as Arc<dyn Pane>,
+            });
+        assert!(changed, "pane 3 replaced pane 2");
+        let ids: Vec<PaneId> = widths(&tab).iter().map(|w| w.0).collect();
+        assert_eq!(ids, vec![1, 3]);
+        assert_eq!((one.resize_count(), three.resize_count()), (0, 0));
+    }
+
+    #[test]
+    fn resync_zoom_change_reapplies_local_size() {
+        let (tab, one, two) = split_tab();
+        let stale = term_size(49, 25);
+        let tree = reported_split(
+            reported_leaf(1, stale, false),
+            reported_leaf(2, stale, true),
+            stale,
+            stale,
+        );
+        let changed =
+            tab.sync_with_pane_tree(term_size(99, 25), tree, |entry| match entry.pane_id {
+                1 => Arc::clone(&one) as Arc<dyn Pane>,
+                _ => Arc::clone(&two) as Arc<dyn Pane>,
+            });
+        assert!(!changed, "zoom is not topology");
+        assert_eq!(one.resize_count(), 0);
+        assert_eq!(two.resize_count(), 1);
+        assert_eq!(
+            *two.size.lock(),
+            term_size(80, 24),
+            "the local tab size, not the reported one"
+        );
+    }
+
+    #[test]
+    fn topology_compares_panes_and_directions_only() {
+        let leaf = |id: PaneId| Tree::Leaf(FakePane::new(id, term_size(10, 10)));
+        let node = |direction: SplitDirection, a: Tree, b: Tree, cols: usize| Tree::Node {
+            left: Box::new(a),
+            right: Box::new(b),
+            data: Some(SplitDirectionAndSize {
+                direction,
+                first: term_size(cols, 10),
+                second: term_size(cols, 10),
+            }),
+        };
+        let base = node(SplitDirection::Horizontal, leaf(1), leaf(2), 10);
+        assert!(is_same_topology(
+            &base,
+            &node(SplitDirection::Horizontal, leaf(1), leaf(2), 30)
+        ));
+        assert!(!is_same_topology(
+            &base,
+            &node(SplitDirection::Vertical, leaf(1), leaf(2), 10)
+        ));
+        assert!(!is_same_topology(
+            &base,
+            &node(SplitDirection::Horizontal, leaf(2), leaf(1), 10)
+        ));
+        assert!(!is_same_topology(&base, &leaf(1)));
     }
 
     #[test]
