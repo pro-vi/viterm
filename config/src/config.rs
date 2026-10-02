@@ -522,6 +522,21 @@ pub struct Config {
     #[dynamic(default = "default_tab_max_width")]
     pub tab_max_width: usize,
 
+    /// When set, the fancy tab bar shows each title at its natural width and
+    /// cuts long titles, never below this many cells, only as far as needed
+    /// for every tab to fit in its rows. The default of 0 turns this off.
+    #[dynamic(default)]
+    pub tab_min_width: usize,
+
+    /// When set, the fancy tab bar keeps the width of this many characters
+    /// free at the right of every row for that row's right status, whatever
+    /// the status says, so the status text never changes where the tabs go.
+    /// A character is the average width of the lowercase letters and digits
+    /// in the tab bar font. Status text wider than this loses characters from
+    /// its start. The default of 0 gives the status the width of its text.
+    #[dynamic(default)]
+    pub tab_bar_status_width: f32,
+
     /// If true, hide the tab bar if the window only has a single tab.
     #[dynamic(default)]
     pub hide_tab_bar_if_only_one_tab: bool,
