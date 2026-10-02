@@ -1002,8 +1002,15 @@ impl TermWindow {
                 } else {
                     log::trace!("DeadKeyStatus now: {:?}", status);
                 }
-                self.dead_key_status = status;
-                self.update_title();
+                // The macOS text input path advises DeadKeyStatus::None for
+                // every inserted character, so most of these are no-ops.
+                // The tab bar does not read the composition state; only the
+                // renderer and `window:composition_status()` do, so a change
+                // needs a repaint and a status update, not a tab bar rebuild.
+                if self.dead_key_status != status {
+                    self.dead_key_status = status;
+                    self.schedule_status_update();
+                }
                 // Ensure that we repaint so that any composing
                 // text is updated
                 window.invalidate();
