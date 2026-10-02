@@ -19,7 +19,7 @@ use window::WindowEvent;
 const SLOW: Duration = Duration::from_millis(16);
 
 #[derive(Default)]
-pub struct EventLedger {
+pub struct EventTiming {
     current: Option<Current>,
 }
 
@@ -32,7 +32,7 @@ struct Current {
     tabs: usize,
 }
 
-impl EventLedger {
+impl EventTiming {
     pub fn begin(&mut self, event: &WindowEvent) {
         let (kind, pane) = event_kind(event);
         self.current = Some(Current {
