@@ -280,6 +280,50 @@ pub struct ClientDomain {
     label: String,
     inner: Mutex<Option<Arc<ClientInner>>>,
     local_domain_id: DomainId,
+    resync_state: Mutex<ResyncState>,
+}
+
+/// Whether a resync of this domain is running, and whether another was asked
+/// for while it ran. A burst of TabResized messages from the server asks for
+/// one resync per message, and each resync re-reads every tab, so requests
+/// that arrive while one runs fold into a single resync after it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ResyncState {
+    #[default]
+    Idle,
+    Running,
+    RunningAndQueued,
+}
+
+impl ResyncState {
+    /// A resync was asked for. Returns true when the caller is to run it.
+    fn request(&mut self) -> bool {
+        match self {
+            Self::Idle => {
+                *self = Self::Running;
+                true
+            }
+            Self::Running | Self::RunningAndQueued => {
+                *self = Self::RunningAndQueued;
+                false
+            }
+        }
+    }
+
+    /// The running resync finished, with or without an error. Returns true
+    /// when a request arrived meanwhile and the caller is to run once more.
+    fn finish(&mut self) -> bool {
+        match self {
+            Self::RunningAndQueued => {
+                *self = Self::Running;
+                true
+            }
+            Self::Running | Self::Idle => {
+                *self = Self::Idle;
+                false
+            }
+        }
+    }
 }
 
 async fn update_remote_workspace(
@@ -430,6 +474,24 @@ impl ClientDomain {
             label,
             inner: Mutex::new(None),
             local_domain_id,
+            resync_state: Mutex::new(ResyncState::Idle),
+        }
+    }
+
+    /// Resyncs unless a resync is already running, in which case the request
+    /// is folded into one more resync after the running one ends.
+    pub async fn resync_coalesced(&self) -> anyhow::Result<()> {
+        if !self.resync_state.lock().unwrap().request() {
+            return Ok(());
+        }
+        loop {
+            let result = self.resync().await;
+            if !self.resync_state.lock().unwrap().finish() {
+                return result;
+            }
+            if let Err(err) = result {
+                log::error!("resync failed, running the queued one: {err:#}");
+            }
         }
     }
 
@@ -1093,5 +1155,32 @@ impl Domain for ClientDomain {
         } else {
             DomainState::Detached
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::ResyncState;
+
+    #[test]
+    fn requests_during_a_resync_fold_into_one_more() {
+        let mut state = ResyncState::Idle;
+        assert!(state.request(), "the first request runs");
+        for _ in 0..40 {
+            assert!(!state.request(), "requests while it runs do not");
+        }
+        assert_eq!(state, ResyncState::RunningAndQueued);
+        assert!(state.finish(), "one more runs after it");
+        assert_eq!(state, ResyncState::Running);
+        assert!(!state.finish(), "and then nothing");
+        assert_eq!(state, ResyncState::Idle);
+    }
+
+    #[test]
+    fn a_finished_resync_with_nothing_queued_goes_idle() {
+        let mut state = ResyncState::Idle;
+        assert!(state.request());
+        assert!(!state.finish());
+        assert!(state.request(), "a later request runs again");
     }
 }

@@ -316,7 +316,7 @@ fn process_unilateral(
                             anyhow!("domain {} is not a ClientDomain instance", local_domain_id)
                         })?;
 
-                client_domain.resync().await
+                client_domain.resync_coalesced().await
             })
             .detach();
 
