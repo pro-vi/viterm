@@ -60,6 +60,14 @@ pub struct Tab {
     tab_id: TabId,
 }
 
+#[derive(PartialEq)]
+struct LayoutSnapshot {
+    size: TerminalSize,
+    zoomed: Option<PaneId>,
+    /// Pane id, left, top, width, height, pixel width, pixel height.
+    panes: Vec<(PaneId, usize, usize, usize, usize, usize, usize)>,
+}
+
 #[derive(Clone)]
 pub struct PositionedPane {
     /// The topological pane index that can be used to reference this pane
@@ -614,7 +622,7 @@ impl Tab {
     /// first.  For large resizes this tends to proportionally adjust
     /// the relative sizes of the elements in a split.
     pub fn resize(&self, size: TerminalSize) {
-        self.inner.lock().resize(size)
+        self.inner.lock().resize(size);
     }
 
     /// Called when running in the mux server after an individual pane
@@ -791,6 +799,7 @@ impl TabInner {
 
         log::debug!("sync_with_pane_tree with size {:?}", size);
 
+        let before = self.layout_snapshot();
         let t = build_from_pane_tree(root.into_tree(), &mut active, &mut zoomed, &mut make_pane);
         let mut cursor = t.cursor();
 
@@ -822,7 +831,10 @@ impl TabInner {
         self.zoomed = zoomed;
         self.size = size;
 
-        self.resize(size);
+        self.apply_size(size);
+        if self.layout_snapshot() != before {
+            Mux::try_get().map(|mux| mux.notify(MuxNotification::TabResized(self.id)));
+        }
 
         log::debug!(
             "sync tab: {:#?} zoomed: {} {:#?}",
@@ -1151,7 +1163,19 @@ impl TabInner {
         self.size
     }
 
-    fn resize(&mut self, size: TerminalSize) {
+    /// Applies `size`, announces `TabResized` when that changed the
+    /// layout, and returns whether it did.
+    fn resize(&mut self, size: TerminalSize) -> bool {
+        let before = self.layout_snapshot();
+        self.apply_size(size);
+        let changed = self.layout_snapshot() != before;
+        if changed {
+            Mux::try_get().map(|mux| mux.notify(MuxNotification::TabResized(self.id)));
+        }
+        changed
+    }
+
+    fn apply_size(&mut self, size: TerminalSize) {
         if size.rows == 0 || size.cols == 0 {
             // Ignore "impossible" resize requests
             return;
@@ -1193,8 +1217,33 @@ impl TabInner {
             // And then resize the individual panes to match
             apply_sizes_from_splits(self.pane.as_mut().unwrap(), &size);
         }
+    }
 
-        Mux::try_get().map(|mux| mux.notify(MuxNotification::TabResized(self.id)));
+    /// The tab's size, its zoomed pane and where each pane sits: what a
+    /// `TabResized` notification tells its observers about. Each one makes
+    /// a mux client re-read the whole pane tree from the server, and that
+    /// re-read applies sizes the tab usually has already, so a resize path
+    /// compares this before and after and announces only a change.
+    fn layout_snapshot(&mut self) -> LayoutSnapshot {
+        LayoutSnapshot {
+            size: self.size,
+            zoomed: self.zoomed.as_ref().map(|pane| pane.pane_id()),
+            panes: self
+                .iter_panes_ignoring_zoom()
+                .iter()
+                .map(|p| {
+                    (
+                        p.pane.pane_id(),
+                        p.left,
+                        p.top,
+                        p.width,
+                        p.height,
+                        p.pixel_width,
+                        p.pixel_height,
+                    )
+                })
+                .collect(),
+        }
     }
 
     fn apply_pane_size(&mut self, pane_size: TerminalSize, cursor: &mut Cursor) {
@@ -1265,12 +1314,15 @@ impl TabInner {
             }
         }
 
+        let before = self.layout_snapshot();
         if let Some(root) = self.pane.as_mut() {
             if let Some(size) = compute_size(root) {
                 self.size = size;
             }
         }
-        Mux::try_get().map(|mux| mux.notify(MuxNotification::TabResized(self.id)));
+        if self.layout_snapshot() != before {
+            Mux::try_get().map(|mux| mux.notify(MuxNotification::TabResized(self.id)));
+        }
     }
 
     fn resize_split_by(&mut self, split_index: usize, delta: isize) {
@@ -2340,6 +2392,28 @@ mod test {
         fn get_current_working_dir(&self, _policy: CachePolicy) -> Option<Url> {
             None
         }
+    }
+
+    #[test]
+    fn resize_reports_only_a_layout_change() {
+        let size = TerminalSize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 800,
+            pixel_height: 600,
+            dpi: 96,
+        };
+        let tab = Tab::new(&size);
+        tab.assign_pane(&FakePane::new(1, size));
+        let mut inner = tab.inner.lock();
+        assert!(!inner.resize(size), "the size the tab already has");
+        let wider = TerminalSize {
+            cols: 100,
+            pixel_width: 1000,
+            ..size
+        };
+        assert!(inner.resize(wider), "a new size");
+        assert!(!inner.resize(wider), "the same new size again");
     }
 
     #[test]
