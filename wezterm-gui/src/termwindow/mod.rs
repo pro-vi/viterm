@@ -395,6 +395,9 @@ pub struct TermWindow {
     show_scroll_bar: bool,
     tab_bar: TabBarState,
     fancy_tab_bar: Option<box_model::ComputedElement>,
+    /// How the last fancy tab bar build fitted the tabs into its rows; None
+    /// unless tab_min_width is set.
+    pub tab_bar_fit: Option<render::fancy_tab_bar::TabBarFit>,
     /// Status text per tab bar row; index 0 is the first row, which is the
     /// only one the retro tab bar and a single-row fancy tab bar can show.
     pub right_status: Vec<String>,
@@ -719,6 +722,7 @@ impl TermWindow {
             show_scroll_bar: config.enable_scroll_bar,
             tab_bar: TabBarState::default(),
             fancy_tab_bar: None,
+            tab_bar_fit: None,
             right_status: vec![String::new()],
             left_status: vec![String::new()],
             last_mouse_coords: (0, -1),

@@ -258,6 +258,36 @@ impl UserData for GuiWin {
 
             Ok(result)
         });
+        methods.add_async_method("tab_bar_fit", |_, this, _: ()| async move {
+            let (tx, rx) = smol::channel::bounded(1);
+            this.window
+                .notify(TermWindowNotif::Apply(Box::new(move |term_window| {
+                    tx.try_send(term_window.tab_bar_fit.clone()).ok();
+                })));
+            let fit = rx
+                .recv()
+                .await
+                .map_err(|e| anyhow::anyhow!("{:#}", e))
+                .map_err(luaerr)?;
+
+            #[derive(FromDynamic, ToDynamic)]
+            struct Fit {
+                rows: usize,
+                rows_min: Option<usize>,
+                rows_full: Option<usize>,
+                title_width: usize,
+                tabs_per_row: Vec<usize>,
+            }
+            impl_lua_conversion_dynamic!(Fit);
+
+            Ok(fit.map(|fit| Fit {
+                rows: fit.rows,
+                rows_min: fit.rows_min,
+                rows_full: fit.rows_full,
+                title_width: fit.title_width,
+                tabs_per_row: fit.tabs_per_row,
+            }))
+        });
         methods.add_async_method("active_key_table", |_, this, _: ()| async move {
             let (tx, rx) = smol::channel::bounded(1);
             this.window
