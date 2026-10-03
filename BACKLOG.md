@@ -5,8 +5,8 @@ entry leaves this file at the moment `git switch -c unit/<slug>` is run. The
 entries the plan of 2026-09-06 proposed keep its relative order, minus
 `mux-socket-buffers`, which has a branch and so lives in `PATCHES.md`.
 `tab-order-on-reattach` replaces that plan's `tab-order-over-protocol` (the
-need, not a chosen mechanism). `flash-message` came later and has no place
-in that order yet. Deferred units are decided against
+need, not a chosen mechanism). `flash-message` and `picker-modal` came later
+and have no place in that order yet. Deferred units are decided against
 for the current topology, not retired; they return if the need does. The
 `notes:` lines name investigation notes in `.inbox/`, which is local to this
 machine and not part of this repo.
@@ -80,6 +80,14 @@ Named `tabbar-title-memo` until 2026-10-02; plans written before then use that n
 - needs: Open question: whether the 0.96→1 scale can be done without re-shaping text per frame
 - why: `window:flash(text)`: large centred numerals over the panes for transient feedback, so the tab-jump digits do not have to live in the status bar. Chosen from four rendered candidates
 - notes: `2026-09-18-flash-message-unit-spec.md`
+
+### `picker-modal`
+
+- side: gui
+- state: proposed
+- needs: A choice between extending `InputSelector` in place, where it stays a grid of cells drawn over the pane (`overlay/selector.rs`), and a new picker built as a `Modal` on `box_model`, as the command palette is (`termwindow/palette.rs`). The first is smaller; the second gets padding, borders and mixed font sizes. Either way the Lua surface is the part that could go upstream, so it is decided first
+- why: `InputSelector` is how a config shows a list of its own rows, and Rust fixes its keys: Enter or a pick letter calls the action once with the chosen row's id and label, Escape calls it with none, and the picker closes (`overlay/selector.rs:207`, `:308`, `:370`). It takes its rows when it opens and reads nothing but keys and mouse after that. So one list cannot offer two actions (copy on Enter, open on another key), one row cannot be dismissed alone, Escape does not say which row was highlighted, a heading cannot be unselectable, and nothing can describe the highlighted row. In order of size, a picker could gain: a key map in its config, with the key's name passed to the action; section headings and a detail line for the highlighted row; an action that keeps the list open and returns new rows; rows that change while it is open, which needs a path from the main thread back into the picker that does not exist today. `box_model` draws text, nested boxes and polygons only (`ElementContent`, `box_model.rs:394`), so an image preview in a picker is renderer work outside this unit. Read at `9000b7ec0`; the fork has not changed `selector.rs`, `modal.rs` or the `InputSelector` struct
+- notes: `2026-10-03-picker-modal-consumers-and-source.md`
 
 ## Deferred
 
