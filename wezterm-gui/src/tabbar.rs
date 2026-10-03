@@ -1,7 +1,7 @@
 use crate::termwindow::{PaneInformation, TabInformation, UIItem, UIItemType};
 use config::{ConfigHandle, TabBarColors};
 use finl_unicode::grapheme_clusters::Graphemes;
-use mlua::FromLua;
+use mlua::{FromLua, IntoLua};
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 use termwiz::cell::{unicode_column_width, Cell, CellAttributes};
@@ -54,16 +54,20 @@ struct TitleText {
 /// The lua values that are identical for every `compute_tab_title` call made by
 /// one `TabBarState::new`. Building them once and passing them down keeps
 /// userdata creation proportional to tabs+panes rather than tabs*(tabs+panes).
+/// The config is in here for the same reason: converting the whole `Config`
+/// into a lua table costs more than the rest of a call put together, and a
+/// rebuild calls `format-tab-title` twice per tab. Every call in one rebuild
+/// is therefore handed the same config table.
 struct TabTitleContext<'lua> {
     lua: &'lua mlua::Lua,
     tabs: mlua::Table<'lua>,
     panes: mlua::Table<'lua>,
+    config: mlua::Value<'lua>,
 }
 
 fn call_format_tab_title(
     ctx: &TabTitleContext,
     tab: &TabInformation,
-    config: &ConfigHandle,
     hover: bool,
     tab_max_width: usize,
 ) -> Option<TitleText> {
@@ -79,7 +83,7 @@ fn call_format_tab_title(
                     tab.clone(),
                     tabs,
                     panes,
-                    (**config).clone(),
+                    ctx.config.clone(),
                     hover,
                     tab_max_width,
                 ),
@@ -211,7 +215,7 @@ fn compute_tab_title(
     hover: bool,
     tab_max_width: usize,
 ) -> TitleText {
-    let title = ctx.and_then(|ctx| call_format_tab_title(ctx, tab, config, hover, tab_max_width));
+    let title = ctx.and_then(|ctx| call_format_tab_title(ctx, tab, hover, tab_max_width));
 
     match title {
         Some(title) => title,
@@ -433,14 +437,15 @@ impl TabBarState {
         left_status: &str,
         right_status: &str,
     ) -> Self {
-        // Marshal every tab and pane into lua once here, rather than once per
-        // compute_tab_title call below.
+        // Marshal every tab, every pane and the config into lua once here,
+        // rather than once per compute_tab_title call below.
         let built = config::run_immediate_with_lua_config(|lua| {
             let ctx = match lua.as_deref() {
                 Some(lua) => Some(TabTitleContext {
                     lua,
                     tabs: lua.create_sequence_from(tab_info.iter().cloned())?,
                     panes: lua.create_sequence_from(pane_info.iter().cloned())?,
+                    config: (**config).clone().into_lua(lua)?,
                 }),
                 None => None,
             };
