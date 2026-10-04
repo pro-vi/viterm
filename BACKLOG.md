@@ -25,14 +25,6 @@ Named `tabbar-title-memo` until 2026-10-02; plans written before then use that n
 - why: Marshal-once is `pr-8131-tabbar-lua-once`. Remaining: memoize each tab title on its inputs, coalesce title updates in one event-loop turn, and the OSC 0 double-alert (`2026-09-07-osc0-double-alert-no-title-coalescing.md`). With a `format-tab-title` handler registered, one title notification still rebuilds every tab; `tab-bar-config-once` converts the config into Lua once per rebuild rather than once per call. The size of the remaining benefit is unmeasured until it is built
 - notes: `2026-09-07-tab-title-rebuild-config-conversion-cost.md`, `2026-09-07-osc0-double-alert-no-title-coalescing.md`
 
-### `split-resize-keeps-ratio`
-
-- side: gui
-- state: proposed
-- needs: a decision on the rule: rescale each split from its current sizes, rounding to nearest, or keep a ratio per split on the client only (the split data is on the wire, so a ratio there would change the codec)
-- why: `adjust_x_size` and `adjust_y_size` hand a size change out one cell at a time, left or top first, so a window that grows by an odd number of cells gives the extra cell to the left pane and nothing gives it back. Replaying one 20-step resize burst on a local tab with no server took a 59|60 split to 41|34 in a 76-column window (even is 37|38); every growth step was 5 cells and every shrink step 4. Fullscreen animations are such bursts: live splits went from 77|78 on 2026-09-27 to 83|89 and worse. Found 2026-10-02 once `resync-no-resize-echo` removed the echoes that had masked it
-- notes: the resize harness `balance` check is the exerciser
-
 ### `server-zoomed-tab-size`
 
 - side: server
@@ -40,6 +32,14 @@ Named `tabbar-title-memo` until 2026-10-02; plans written before then use that n
 - needs: a mux restart to take effect, which ends every session; plan `docs/plans/2026-10-02-001-fix-client-size-authority-plan.md` covers the client side without one
 - why: `rebuild_splits_sizes_from_contained_panes` returns early for a zoomed tab, so after a zoomed pane is resized the server's tab size and split data stay at their pre-zoom values and `PaneNode::root_size()` keeps reporting them. A GUI that attaches takes that stale size, and `wezterm cli list` shows it. Reproduced 2026-10-02: 4 of 4 zoomed panes stayed at their zoom-time 120x30 in a throwaway harness, with and without `unit/tabresized-on-change`; live tabs held zoomed panes at 156x44, 173x44 and 80x24 in a 173x43 window
 - notes: none; the harness is `fork/resize-harness/` once U2 of that plan lands
+
+### `split-pixel-size-on-zero-delta`
+
+- side: gui
+- state: proposed
+- needs: a decision on whether a resize that changes the pixels per cell, and leaves a split's cell counts as they were, should refresh the pixel and dpi sizes below that split
+- why: `adjust_x_size` and `adjust_y_size` return at once for a zero cell delta, so a split whose cell count does not change keeps the pixel sizes and dpi it had, though the window's pixels per cell changed. Probe 2026-10-04: a split 5 columns wide (two panes of 2) beside a 94-column pane, resized from 100 to 102 columns at 20 pixels per column instead of 10. On `resync-no-resize-echo` one of the two small panes kept 20 pixels where 40 was expected; with `split-resize-keeps-ratio` both do, because a small split's share now often rounds to the same cell count while the window grows. Found by a code review of that unit
+- notes: none
 
 ### `recenter-drifted-splits`
 
