@@ -766,6 +766,27 @@ fn quote_lua_string(s: &str) -> String {
     result
 }
 
+/// One line of `key_assignment_log`: the time in seconds since the Unix
+/// epoch, the key and modifiers of the binding that matched, the key table
+/// that holds it (null for the default table), and the action spelled the
+/// way `wezterm show-keys --lua` spells it.
+pub fn key_assignment_log_line(
+    time: f64,
+    key: &KeyCode,
+    mods: Modifiers,
+    table: Option<&str>,
+    action: &KeyAssignment,
+) -> String {
+    serde_json::json!({
+        "time": time,
+        "key": lua_key_code(key),
+        "mods": format!("{mods:?}").replace(" ", ""),
+        "table": table,
+        "action": luaify(action.to_dynamic(), true),
+    })
+    .to_string()
+}
+
 fn lua_key(key: &KeyCode, mods: Modifiers, action: &KeyAssignment) -> String {
     let dyn_action = action.to_dynamic();
     // println!(" -- {dyn_action:?}");
@@ -807,5 +828,49 @@ fn show_key_table_as_lua(table: &config::keyassignment::KeyTable, indent: usize)
     for ((key, mods), entry) in ordered {
         let action = &entry.action;
         println!("{pad}{},", lua_key(key, *mods, action));
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use config::keyassignment::PaneDirection;
+
+    #[test]
+    fn key_assignment_log_line_names_the_binding() {
+        let line = key_assignment_log_line(
+            1700000000.25,
+            &KeyCode::Char('H'),
+            Modifiers::SHIFT | Modifiers::ALT,
+            None,
+            &KeyAssignment::ActivatePaneDirection(PaneDirection::Left),
+        );
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "time": 1700000000.25,
+                "key": "H",
+                "mods": "SHIFT|ALT",
+                "table": null,
+                "action": "act.ActivatePaneDirection 'Left'",
+            })
+        );
+        assert!(!line.contains('\n'));
+    }
+
+    #[test]
+    fn key_assignment_log_line_names_the_key_table() {
+        let line = key_assignment_log_line(
+            0.0,
+            &KeyCode::Char('/'),
+            Modifiers::NONE,
+            Some("copy_mode"),
+            &KeyAssignment::ActivateCopyMode,
+        );
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["table"], "copy_mode");
+        assert_eq!(value["mods"], "NONE");
+        assert_eq!(value["action"], "act.ActivateCopyMode");
     }
 }
