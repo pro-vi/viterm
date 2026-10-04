@@ -31,3 +31,19 @@ rebuild the way a large config does.
 The GUI windows appear on screen while a run is going. The output directory
 must contain `resize-harness`, and `probe.lua` refuses any socket outside such
 a directory.
+
+## The live ViTerm after an install
+
+`live-check.py` reads the running ViTerm on `human-main` and changes nothing. Save the server's
+pane list before the GUI is relaunched, then check after the relaunch and again after resizing
+the window (fullscreen on and off is the burst that skewed splits):
+
+```zsh
+fork/resize-harness/live-check.py snapshot ~/.local/state/viterm/before-relaunch.json
+fork/resize-harness/live-check.py check ~/.local/state/viterm/before-relaunch.json
+```
+
+It reports which engine the GUI and server run, panes whose size differs from the snapshot, GUI
+against server, and the GUI's resize counters. A counter missing from the stats table is 0. The
+GUI numbers its own panes and reports no `tty_name`, so it is matched to the server by list
+order and title; the snapshot is matched by the server's pane ids, which survive a relaunch.
