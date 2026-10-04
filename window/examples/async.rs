@@ -87,7 +87,7 @@ impl MyWindow {
             | WindowEvent::DroppedFile(_)
             | WindowEvent::DroppedUrl(_)
             | WindowEvent::DroppedString(_)
-            | WindowEvent::PerformKeyAssignment(_)
+            | WindowEvent::PerformKeyAssignment(..)
             | WindowEvent::MouseLeave
             | WindowEvent::SetInnerSizeCompleted => {}
         }

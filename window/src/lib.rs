@@ -204,8 +204,13 @@ pub enum WindowEvent {
     // Called when text is dropped into the window
     DroppedString(String),
 
-    /// Called by menubar dispatching stuff on some systems
-    PerformKeyAssignment(config::keyassignment::KeyAssignment),
+    /// Called by menubar dispatching stuff on some systems.
+    /// The key and modifiers are present when a key press activated
+    /// the menu item through its shortcut, rather than a mouse click.
+    PerformKeyAssignment(
+        config::keyassignment::KeyAssignment,
+        Option<(KeyCode, Modifiers)>,
+    ),
 
     AdviseModifiersLedStatus(Modifiers, KeyboardLedStatus),
 }

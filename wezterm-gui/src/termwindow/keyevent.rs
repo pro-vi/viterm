@@ -240,7 +240,7 @@ impl super::TermWindow {
     /// assignment that a key press has just performed. Writing after the
     /// action leaves the action's timing as it was. The file stays open
     /// between presses and is opened again when the configured path changes.
-    fn log_key_assignment(
+    pub(super) fn log_key_assignment(
         &mut self,
         keycode: &KeyCode,
         mods: Modifiers,

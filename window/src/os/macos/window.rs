@@ -2361,13 +2361,30 @@ impl WindowView {
         // Safe because weztermPerformKeyAssignment: is only used with KeyAssignment
         let action = menu_item.get_represented_item();
         log::debug!("wezterm_perform_key_assignment {action:?}",);
+        // A menu item's shortcut is a key equivalent: macOS hands the key
+        // press to the menu, and the window never sees it as a key event.
+        // Pass the key along so the window can still tell it was a key.
+        let key = unsafe {
+            let event: id = msg_send![appkit::NSApp(), currentEvent];
+            if event != nil && event.eventType() == appkit::NSEventType::NSKeyDown {
+                let unmod = nsstring_to_str(event.charactersIgnoringModifiers());
+                (!unmod.is_empty()).then(|| {
+                    (
+                        KeyCode::composed(unmod),
+                        key_modifiers(event.modifierFlags()),
+                    )
+                })
+            } else {
+                None
+            }
+        };
         match action {
             Some(RepresentedItem::KeyAssignment(action)) => {
                 if let Some(this) = Self::get_this(this) {
                     this.inner
                         .borrow_mut()
                         .events
-                        .dispatch(WindowEvent::PerformKeyAssignment(action));
+                        .dispatch(WindowEvent::PerformKeyAssignment(action, key));
                 }
             }
             None => {}
