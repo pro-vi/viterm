@@ -171,6 +171,8 @@ As features stabilize some brief notes about them will accumulate here.
   rather than wrapping the same remote pane twice.
 
 - The mux server observes client EOF before queued pane notifications, preserves buffered request bytes, and skips queued render work after disconnect.
+
+* Mux connections receive pane output and alerts only after asking for render changes. One request activates the whole connection, preserving background-pane updates; CLI replies and subscribed key-input echo retain their behavior.
 * macOS: Fix window border when opacity<1 and shadow enabled.
   Thanks to @Adams-Galaxy! #8038 #5158
 * perf: Terminal images were hashed three times each on the transmit path; the sha256

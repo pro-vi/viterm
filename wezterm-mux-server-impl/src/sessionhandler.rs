@@ -22,11 +22,16 @@ use wezterm_term::StableRowIndex;
 pub struct PduSender {
     func: Arc<dyn Fn(DecodedPdu) -> anyhow::Result<()> + Send + Sync>,
     connected: Arc<AtomicBool>,
+    render_subscribed: Arc<AtomicBool>,
 }
 
 impl PduSender {
     fn is_connected(&self) -> bool {
         self.connected.load(Ordering::Acquire)
+    }
+
+    fn render_subscribed(&self) -> bool {
+        self.render_subscribed.load(Ordering::Acquire)
     }
 
     pub fn send(&self, pdu: DecodedPdu) -> anyhow::Result<()> {
@@ -40,6 +45,7 @@ impl PduSender {
         Self {
             func: Arc::new(f),
             connected: Arc::new(AtomicBool::new(true)),
+            render_subscribed: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -157,7 +163,7 @@ fn maybe_push_pane_changes(
     sender: PduSender,
     per_pane: Arc<Mutex<PerPane>>,
 ) -> anyhow::Result<()> {
-    if !sender.is_connected() {
+    if !sender.is_connected() || !sender.render_subscribed() {
         return Ok(());
     }
     let mut per_pane = per_pane.lock().unwrap();
@@ -259,6 +265,10 @@ impl Drop for SessionHandler {
 }
 
 impl SessionHandler {
+    pub(crate) fn render_subscription(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.to_write_tx.render_subscribed)
+    }
+
     pub fn new(to_write_tx: PduSender) -> Self {
         Self {
             to_write_tx,
@@ -277,6 +287,9 @@ impl SessionHandler {
     }
 
     pub fn schedule_pane_push(&mut self, pane_id: PaneId) {
+        if !self.to_write_tx.render_subscribed() {
+            return;
+        }
         let sender = self.to_write_tx.clone();
         let per_pane = self.per_pane(pane_id);
         spawn_into_main_thread(async move { push_pane_changes(pane_id, sender, per_pane) })
@@ -718,10 +731,10 @@ impl SessionHandler {
                             // cursor position so that the predictive echo doesn't
                             // leave the cursor in the wrong place
                             let mut per_pane = per_pane.lock().unwrap();
-                            if let Some(resp) = sender
-                                .is_connected()
-                                .then(|| per_pane.compute_changes(&pane, Some(input_serial)))
-                                .flatten()
+                            if let Some(resp) = (sender.is_connected()
+                                && sender.render_subscribed())
+                            .then(|| per_pane.compute_changes(&pane, Some(input_serial)))
+                            .flatten()
                             {
                                 sender.send(DecodedPdu {
                                     pdu: Pdu::GetPaneRenderChangesResponse(resp),
@@ -804,6 +817,9 @@ impl SessionHandler {
             }
 
             Pdu::GetPaneRenderChanges(GetPaneRenderChanges { pane_id, .. }) => {
+                self.to_write_tx
+                    .render_subscribed
+                    .store(true, Ordering::Release);
                 let sender = self.to_write_tx.clone();
                 let per_pane = self.per_pane(pane_id);
                 spawn_into_main_thread(async move {
@@ -1060,6 +1076,42 @@ impl SessionHandler {
                 send_response(Err(anyhow!("expected a request, got {:?}", decoded.pdu)))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod render_subscription_tests {
+    use super::*;
+
+    #[test]
+    fn silent_connections_allocate_no_proactive_pane_state() {
+        let mut handler = SessionHandler::new(PduSender::new(|_| Ok(())));
+        for pane in 0..100 {
+            handler.schedule_pane_push(pane);
+        }
+        assert!(handler.per_pane.is_empty());
+        assert!(!handler.to_write_tx.render_subscribed());
+    }
+
+    #[test]
+    fn the_first_render_request_activates_interest_before_main_thread_work() {
+        let queue = Arc::new(Mutex::new(Vec::new()));
+        let queued = Arc::clone(&queue);
+        promise::spawn::set_schedulers(
+            Box::new(move |task| {
+                queued.lock().unwrap().push(task);
+            }),
+            Box::new(|_| {}),
+        );
+        let mut handler = SessionHandler::new(PduSender::new(|_| Ok(())));
+        let interest = handler.render_subscription();
+        assert!(!interest.load(Ordering::Acquire));
+        handler.process_one(DecodedPdu {
+            serial: 7,
+            pdu: Pdu::GetPaneRenderChanges(GetPaneRenderChanges { pane_id: 42 }),
+        });
+        assert!(interest.load(Ordering::Acquire));
+        assert!(!queue.lock().unwrap().is_empty());
     }
 }
 

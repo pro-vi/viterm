@@ -6,6 +6,7 @@ use futures::FutureExt;
 use mux::{Mux, MuxNotification};
 use smol::prelude::*;
 use smol::Async;
+use std::sync::atomic::{AtomicBool, Ordering};
 use wezterm_uds::UnixStream;
 
 #[cfg(unix)]
@@ -30,6 +31,25 @@ async fn next_item<T: async_io::IoSafe + std::io::Read>(
     // Try an actual read before queued work, retaining bytes for PDU decoding.
     let wait_for_read = stream.fill_buf().map(|_| Ok(Item::Readable));
     smol::future::or(wait_for_read, items.recv()).await
+}
+
+fn enqueue_notification(
+    tx: &smol::channel::Sender<Item>,
+    render_subscribed: &AtomicBool,
+    notification: MuxNotification,
+) -> bool {
+    if tx.is_closed() {
+        return false;
+    }
+    if !render_subscribed.load(Ordering::Acquire)
+        && matches!(
+            notification,
+            MuxNotification::PaneOutput(_) | MuxNotification::Alert { .. }
+        )
+    {
+        return true;
+    }
+    tx.try_send(Item::Notif(notification)).is_ok()
 }
 
 pub async fn process<T>(stream: T) -> anyhow::Result<()>
@@ -68,11 +88,12 @@ where
         }
     });
     let mut handler = SessionHandler::new(pdu_sender);
+    let render_subscribed = handler.render_subscription();
 
     {
         let mux = Mux::get();
         let tx = item_tx.clone();
-        mux.subscribe(move |n| tx.try_send(Item::Notif(n)).is_ok());
+        mux.subscribe(move |n| enqueue_notification(&tx, &render_subscribed, n));
     }
 
     loop {
@@ -292,5 +313,59 @@ mod tests {
                 Item::WritePdu(DecodedPdu { serial: 6, .. })
             ));
         });
+    }
+}
+
+#[cfg(test)]
+mod subscription_tests {
+    use super::*;
+
+    #[test]
+    fn silent_connections_do_not_queue_output_or_alerts() {
+        let (tx, rx) = smol::channel::unbounded();
+        let interest = AtomicBool::new(false);
+        for pane in 0..100 {
+            assert!(enqueue_notification(
+                &tx,
+                &interest,
+                MuxNotification::PaneOutput(pane)
+            ));
+            assert!(enqueue_notification(
+                &tx,
+                &interest,
+                MuxNotification::Alert {
+                    pane_id: pane,
+                    alert: wezterm_term::terminal::Alert::PaletteChanged,
+                }
+            ));
+        }
+        assert!(rx.is_empty());
+        assert!(enqueue_notification(
+            &tx,
+            &interest,
+            MuxNotification::PaneRemoved(42)
+        ));
+        assert_eq!(rx.len(), 1, "topology retains its existing contract");
+        drop(rx);
+        assert!(!enqueue_notification(
+            &tx,
+            &interest,
+            MuxNotification::PaneOutput(42)
+        ));
+    }
+
+    #[test]
+    fn render_interest_includes_unpolled_background_panes() {
+        let (tx, rx) = smol::channel::unbounded();
+        let interest = AtomicBool::new(true);
+        assert!(enqueue_notification(
+            &tx,
+            &interest,
+            MuxNotification::PaneOutput(99)
+        ));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            Item::Notif(MuxNotification::PaneOutput(99))
+        ));
     }
 }
