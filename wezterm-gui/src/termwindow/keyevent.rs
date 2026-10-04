@@ -236,6 +236,54 @@ impl super::TermWindow {
             .map(|entry| (entry, None))
     }
 
+    /// Appends a line to `key_assignment_log`, when one is configured, for an
+    /// assignment that a key press has just performed. Writing after the
+    /// action leaves the action's timing as it was. The file stays open
+    /// between presses and is opened again when the configured path changes.
+    fn log_key_assignment(
+        &mut self,
+        keycode: &KeyCode,
+        mods: Modifiers,
+        table: Option<&str>,
+        action: &KeyAssignment,
+    ) {
+        let Some(path) = self.config.key_assignment_log.clone() else {
+            self.key_assignment_log = None;
+            return;
+        };
+        if !matches!(&self.key_assignment_log, Some((open, _)) if *open == path) {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .map_err(|err| log::error!("key_assignment_log {}: {err:#}", path.display()))
+                .ok();
+            self.key_assignment_log = Some((path, file));
+        }
+        let Some((path, slot)) = &mut self.key_assignment_log else {
+            return;
+        };
+        let Some(file) = slot else {
+            return;
+        };
+        // The table is keyed by the shift-normalized key, so log that form:
+        // it is the binding that matched, whatever case the press produced.
+        let (key, mods) = keycode.normalize_shift(mods.remove_positional_mods());
+        let time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs_f64())
+            .unwrap_or(0.0);
+        let mut line = crate::inputmap::key_assignment_log_line(time, &key, mods, table, action);
+        line.push('\n');
+        if let Err(err) = std::io::Write::write_all(file, line.as_bytes()) {
+            log::error!("key_assignment_log {}: {err:#}", path.display());
+            *slot = None;
+        }
+    }
+
     fn process_key(
         &mut self,
         pane: &Arc<dyn Pane>,
@@ -294,7 +342,7 @@ impl super::TermWindow {
                 if self.config.debug_key_events {
                     log::info!(
                         "{}{:?} {:?} -> perform {:?}",
-                        match table_name {
+                        match &table_name {
                             Some(name) => format!("table:{} ", name),
                             None => String::new(),
                         },
@@ -312,6 +360,12 @@ impl super::TermWindow {
                 };
 
                 if handled {
+                    self.log_key_assignment(
+                        keycode,
+                        raw_modifiers | leader_mod,
+                        table_name.as_deref(),
+                        &entry.action,
+                    );
                     context.invalidate();
 
                     if leader_active {

@@ -392,6 +392,9 @@ pub struct TermWindow {
     leader_is_down: Option<std::time::Instant>,
     dead_key_status: DeadKeyStatus,
     key_table_state: KeyTableState,
+    /// The configured `key_assignment_log` path and its open file; the file
+    /// is None when opening it failed, so a bad path is reported once.
+    key_assignment_log: Option<(std::path::PathBuf, Option<std::fs::File>)>,
     show_tab_bar: bool,
     show_scroll_bar: bool,
     tab_bar: TabBarState,
@@ -800,6 +803,7 @@ impl TermWindow {
             last_ui_item: None,
             is_click_to_focus_window: false,
             key_table_state: KeyTableState::default(),
+            key_assignment_log: None,
             modal: RefCell::new(None),
             opengl_info: None,
         };
