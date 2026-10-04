@@ -17,7 +17,7 @@ and is deliberately untracked.
 |---|---|
 | `main` | a pure mirror of `upstream/main`. Never commit here. |
 | `unit/<slug>` | exactly one change, based on `upstream/main`, written so it could be sent upstream as it stands |
-| `build` | `upstream/main` plus `git merge --no-ff` of each active unit, plus the fork-only files. **Every local build comes from here.** |
+| `build` | `upstream/main` plus `git merge --no-ff` of each active unit, plus the fork-only files. **Every installed engine build comes from here.** |
 | everything else | upstream's own branches, fetched. None of them is ours. |
 
 `PATCHES.md` is the ledger: one row per unit that has a branch, with its base,
