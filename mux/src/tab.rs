@@ -112,6 +112,37 @@ pub struct SplitDirectionAndSize {
     pub direction: SplitDirection,
     pub first: TerminalSize,
     pub second: TerminalSize,
+    /// The share of the split's cells (not counting the divider) that the
+    /// first child takes, kept so that a later resize divides the cells the
+    /// same way instead of rounding the cell counts again. Whatever else
+    /// writes `first` or `second` need not clear it: it is used only while
+    /// the split still holds the cells the last resize gave it, and is
+    /// otherwise taken from the cells again.
+    /// It is never sent: a peer without this field reads the same bytes,
+    /// and a split received from one starts without a ratio. Two splits
+    /// with the same cells therefore compare unequal if only one has one.
+    #[serde(skip)]
+    pub ratio: Option<SplitRatio>,
+}
+
+/// `first` out of `total` cells, not counting the divider, and the
+/// (first, second) cells the split was last set to using it.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct SplitRatio {
+    first: usize,
+    total: usize,
+    placed: (usize, usize),
+}
+
+impl SplitRatio {
+    /// The first child's cells when the split has `available` cells,
+    /// rounded to the nearest cell.
+    fn first_cells(&self, available: usize) -> usize {
+        if self.total == 0 {
+            return 0;
+        }
+        (self.first * available * 2 + self.total) / (self.total * 2)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
@@ -343,9 +374,42 @@ fn compute_min_size(tree: &mut Tree) -> (usize, usize) {
     }
 }
 
+/// The (first, second) cells a split holding `current` cells takes when it
+/// has `available` cells (not counting the divider) to divide, neither child
+/// going below its minimum.
+///
+/// The ratio kept from an earlier resize is used only while the split still
+/// holds the cells that resize gave it: when anything else moved the divider
+/// or changed the size (a drag, sizes reported by a server) the cells are the
+/// truth and the ratio is taken from them again. A drag that ends on the very
+/// cells the ratio gave is not noticed. A ratio that a minimum size overrode
+/// stays valid, whatever happens to the minimums meanwhile, so the split
+/// returns to it when the room comes back.
+fn split_cells(
+    ratio: &mut Option<SplitRatio>,
+    current: (usize, usize),
+    available: usize,
+    min_first: usize,
+    min_second: usize,
+) -> (usize, usize) {
+    let kept = match *ratio {
+        Some(kept) if kept.placed == current => kept,
+        _ => SplitRatio {
+            first: current.0,
+            total: current.0 + current.1,
+            placed: current,
+        },
+    };
+    let room = available.saturating_sub(min_second);
+    let first = kept.first_cells(available).min(room).max(min_first);
+    let placed = (first, available.saturating_sub(first));
+    *ratio = Some(SplitRatio { placed, ..kept });
+    placed
+}
+
 fn adjust_x_size(tree: &mut Tree, mut x_adjust: isize, cell_dimensions: &TerminalSize) {
-    let (min_x, _) = compute_min_size(tree);
-    while x_adjust != 0 {
+    if x_adjust != 0 {
+        let (min_x, _) = compute_min_size(tree);
         match tree {
             Tree::Empty | Tree::Leaf(_) => return,
             Tree::Node { data: None, .. } => return,
@@ -375,37 +439,36 @@ fn adjust_x_size(tree: &mut Tree, mut x_adjust: isize, cell_dimensions: &Termina
                         }
                         return;
                     }
-                    SplitDirection::Horizontal if x_adjust > 0 => {
-                        adjust_x_size(&mut *left, 1, cell_dimensions);
-                        data.first.cols += 1;
+                    SplitDirection::Horizontal => {
+                        let (min_first, _) = compute_min_size(&mut *left);
+                        let (min_second, _) = compute_min_size(&mut *right);
+                        let available =
+                            (data.first.cols + data.second.cols).saturating_add_signed(x_adjust);
+                        let (first, second) = split_cells(
+                            &mut data.ratio,
+                            (data.first.cols, data.second.cols),
+                            available,
+                            min_first,
+                            min_second,
+                        );
+
+                        adjust_x_size(
+                            &mut *left,
+                            first as isize - data.first.cols as isize,
+                            cell_dimensions,
+                        );
+                        data.first.cols = first;
                         data.first.pixel_width =
                             data.first.cols.saturating_mul(cell_dimensions.pixel_width);
-                        x_adjust -= 1;
 
-                        if x_adjust > 0 {
-                            adjust_x_size(&mut *right, 1, cell_dimensions);
-                            data.second.cols += 1;
-                            data.second.pixel_width =
-                                data.second.cols.saturating_mul(cell_dimensions.pixel_width);
-                            x_adjust -= 1;
-                        }
-                    }
-                    SplitDirection::Horizontal => {
-                        // x_adjust is negative
-                        if data.first.cols > 1 {
-                            adjust_x_size(&mut *left, -1, cell_dimensions);
-                            data.first.cols -= 1;
-                            data.first.pixel_width =
-                                data.first.cols.saturating_mul(cell_dimensions.pixel_width);
-                            x_adjust += 1;
-                        }
-                        if x_adjust < 0 && data.second.cols > 1 {
-                            adjust_x_size(&mut *right, -1, cell_dimensions);
-                            data.second.cols -= 1;
-                            data.second.pixel_width =
-                                data.second.cols.saturating_mul(cell_dimensions.pixel_width);
-                            x_adjust += 1;
-                        }
+                        adjust_x_size(
+                            &mut *right,
+                            second as isize - data.second.cols as isize,
+                            cell_dimensions,
+                        );
+                        data.second.cols = second;
+                        data.second.pixel_width =
+                            data.second.cols.saturating_mul(cell_dimensions.pixel_width);
                     }
                 }
             }
@@ -414,8 +477,8 @@ fn adjust_x_size(tree: &mut Tree, mut x_adjust: isize, cell_dimensions: &Termina
 }
 
 fn adjust_y_size(tree: &mut Tree, mut y_adjust: isize, cell_dimensions: &TerminalSize) {
-    let (_, min_y) = compute_min_size(tree);
-    while y_adjust != 0 {
+    if y_adjust != 0 {
+        let (_, min_y) = compute_min_size(tree);
         match tree {
             Tree::Empty | Tree::Leaf(_) => return,
             Tree::Node { data: None, .. } => return,
@@ -445,40 +508,38 @@ fn adjust_y_size(tree: &mut Tree, mut y_adjust: isize, cell_dimensions: &Termina
                         }
                         return;
                     }
-                    SplitDirection::Vertical if y_adjust > 0 => {
-                        adjust_y_size(&mut *left, 1, cell_dimensions);
-                        data.first.rows += 1;
+                    SplitDirection::Vertical => {
+                        let (_, min_first) = compute_min_size(&mut *left);
+                        let (_, min_second) = compute_min_size(&mut *right);
+                        let available =
+                            (data.first.rows + data.second.rows).saturating_add_signed(y_adjust);
+                        let (first, second) = split_cells(
+                            &mut data.ratio,
+                            (data.first.rows, data.second.rows),
+                            available,
+                            min_first,
+                            min_second,
+                        );
+
+                        adjust_y_size(
+                            &mut *left,
+                            first as isize - data.first.rows as isize,
+                            cell_dimensions,
+                        );
+                        data.first.rows = first;
                         data.first.pixel_height =
                             data.first.rows.saturating_mul(cell_dimensions.pixel_height);
-                        y_adjust -= 1;
-                        if y_adjust > 0 {
-                            adjust_y_size(&mut *right, 1, cell_dimensions);
-                            data.second.rows += 1;
-                            data.second.pixel_height = data
-                                .second
-                                .rows
-                                .saturating_mul(cell_dimensions.pixel_height);
-                            y_adjust -= 1;
-                        }
-                    }
-                    SplitDirection::Vertical => {
-                        // y_adjust is negative
-                        if data.first.rows > 1 {
-                            adjust_y_size(&mut *left, -1, cell_dimensions);
-                            data.first.rows -= 1;
-                            data.first.pixel_height =
-                                data.first.rows.saturating_mul(cell_dimensions.pixel_height);
-                            y_adjust += 1;
-                        }
-                        if y_adjust < 0 && data.second.rows > 1 {
-                            adjust_y_size(&mut *right, -1, cell_dimensions);
-                            data.second.rows -= 1;
-                            data.second.pixel_height = data
-                                .second
-                                .rows
-                                .saturating_mul(cell_dimensions.pixel_height);
-                            y_adjust += 1;
-                        }
+
+                        adjust_y_size(
+                            &mut *right,
+                            second as isize - data.second.rows as isize,
+                            cell_dimensions,
+                        );
+                        data.second.rows = second;
+                        data.second.pixel_height = data
+                            .second
+                            .rows
+                            .saturating_mul(cell_dimensions.pixel_height);
                     }
                 }
             }
@@ -640,10 +701,9 @@ impl Tab {
 
     /// Apply the new size of the tab to the panes contained within.
     /// The delta between the current and the new size is computed,
-    /// and is distributed between the splits.  For small resizes
-    /// this algorithm biases towards adjusting the left/top nodes
-    /// first.  For large resizes this tends to proportionally adjust
-    /// the relative sizes of the elements in a split.
+    /// and each split divides its new cells between its two children
+    /// in the ratio it kept from its last resize (see `SplitRatio`),
+    /// rounded to the nearest cell and never below a child's minimum size.
     pub fn resize(&self, size: TerminalSize) {
         self.inner.lock().resize(size);
     }
@@ -2029,6 +2089,7 @@ impl TabInner {
                     pixel_width: cell_dims.pixel_width * width2,
                     dpi: cell_dims.dpi,
                 },
+                ratio: None,
             });
         }
 
@@ -2063,6 +2124,7 @@ impl TabInner {
                     pixel_width: cell_dims.pixel_width * width2,
                     dpi: cell_dims.dpi,
                 },
+                ratio: None,
             }
         })
     }
@@ -2480,6 +2542,7 @@ mod test {
                 direction: SplitDirection::Horizontal,
                 first,
                 second,
+                ratio: None,
             },
         }
     }
@@ -2590,6 +2653,7 @@ mod test {
                 direction,
                 first: term_size(cols, 10),
                 second: term_size(cols, 10),
+                ratio: None,
             }),
         };
         let base = node(SplitDirection::Horizontal, leaf(1), leaf(2), 10);
@@ -2689,6 +2753,7 @@ mod test {
                     pixel_height: 600,
                     dpi: 96,
                 },
+                ratio: None,
             }
         );
 
@@ -2718,7 +2783,8 @@ mod test {
                     pixel_width: 800,
                     pixel_height: 275,
                     dpi: 96,
-                }
+                },
+                ratio: None,
             }
         );
 
@@ -2829,6 +2895,190 @@ mod test {
         assert_eq!(24, panes[2].height);
         assert_eq!(400, panes[2].pixel_width);
         assert_eq!(600, panes[2].pixel_height);
+    }
+
+    /// A tab of `cols` x `rows` cells holding panes 1 and 2, split in
+    /// `direction` the way `Tab::split_and_insert` splits a new pane off.
+    fn tab_with_two_panes(cols: usize, rows: usize, direction: SplitDirection) -> Tab {
+        let size = term_size(cols, rows);
+        let tab = Tab::new(&size);
+        tab.assign_pane(&FakePane::new(1, size));
+        let request = SplitRequest {
+            direction,
+            ..Default::default()
+        };
+        let halves = tab.compute_split_size(0, request).unwrap();
+        tab.split_and_insert(0, request, FakePane::new(2, halves.second))
+            .unwrap();
+        tab
+    }
+
+    fn pane_widths(tab: &Tab) -> Vec<usize> {
+        tab.iter_panes().iter().map(|pane| pane.width).collect()
+    }
+
+    fn pane_heights(tab: &Tab) -> Vec<usize> {
+        tab.iter_panes().iter().map(|pane| pane.height).collect()
+    }
+
+    /// The sizes of a burst of window resizes that ends where it started:
+    /// twenty steps that alternately grow by an odd number of cells and
+    /// shrink by an even one, then the way back.
+    fn burst_sizes(start: usize) -> Vec<usize> {
+        let mut size = start;
+        let mut sizes = vec![];
+        for step in 0..20 {
+            size = if step % 2 == 0 { size + 5 } else { size - 4 };
+            sizes.push(size);
+        }
+        sizes.push(start);
+        sizes
+    }
+
+    #[test]
+    fn a_resize_burst_that_ends_where_it_began_restores_a_horizontal_split() {
+        let tab = tab_with_two_panes(120, 24, SplitDirection::Horizontal);
+        let before = pane_widths(&tab);
+        assert_eq!(before, vec![59, 60]);
+        for cols in burst_sizes(120) {
+            tab.resize(term_size(cols, 24));
+            let widths = pane_widths(&tab);
+            assert_eq!(
+                widths[0] + widths[1] + 1,
+                cols,
+                "the panes and the divider fill the tab"
+            );
+            assert_eq!(
+                widths[0],
+                (59 * (cols - 1) * 2 + 119) / 238,
+                "the first pane keeps its share of the cells at {cols} columns"
+            );
+        }
+        assert_eq!(pane_widths(&tab), before);
+    }
+
+    #[test]
+    fn a_resize_burst_that_ends_where_it_began_restores_a_vertical_split() {
+        let tab = tab_with_two_panes(80, 120, SplitDirection::Vertical);
+        let before = pane_heights(&tab);
+        assert_eq!(before, vec![59, 60]);
+        for rows in burst_sizes(120) {
+            tab.resize(term_size(80, rows));
+            let heights = pane_heights(&tab);
+            assert_eq!(
+                heights[0] + heights[1] + 1,
+                rows,
+                "the panes and the divider fill the tab"
+            );
+        }
+        assert_eq!(pane_heights(&tab), before);
+    }
+
+    #[test]
+    fn splits_in_a_row_come_back_after_a_burst() {
+        let size = term_size(120, 24);
+        let tab = Tab::new(&size);
+        tab.assign_pane(&FakePane::new(1, size));
+        let request = SplitRequest {
+            direction: SplitDirection::Horizontal,
+            ..Default::default()
+        };
+        let halves = tab.compute_split_size(0, request).unwrap();
+        tab.split_and_insert(0, request, FakePane::new(2, halves.second))
+            .unwrap();
+        let halves = tab.compute_split_size(1, request).unwrap();
+        tab.split_and_insert(1, request, FakePane::new(3, halves.second))
+            .unwrap();
+        let before = pane_widths(&tab);
+        assert_eq!(before.iter().sum::<usize>() + 2, 120);
+
+        for cols in burst_sizes(120) {
+            tab.resize(term_size(cols, 24));
+        }
+        assert_eq!(pane_widths(&tab), before);
+    }
+
+    #[test]
+    fn a_split_squeezed_to_its_minimum_returns_to_its_share_when_room_comes_back() {
+        let tab = tab_with_two_panes(120, 24, SplitDirection::Horizontal);
+        tab.resize_split_by(0, -54);
+        assert_eq!(pane_widths(&tab), vec![5, 114]);
+
+        tab.resize(term_size(4, 24));
+        assert_eq!(
+            pane_widths(&tab),
+            vec![1, 2],
+            "one cell is the least a pane takes"
+        );
+
+        tab.resize(term_size(120, 24));
+        assert_eq!(pane_widths(&tab), vec![5, 114]);
+    }
+
+    #[test]
+    fn a_divider_moved_after_a_resize_sets_the_share_for_the_next_one() {
+        let tab = tab_with_two_panes(120, 24, SplitDirection::Horizontal);
+        tab.resize(term_size(80, 24));
+        assert_eq!(pane_widths(&tab), vec![39, 40]);
+
+        tab.resize_split_by(0, 3);
+        assert_eq!(pane_widths(&tab), vec![42, 37]);
+
+        // 42 of 79 cells is 63.3 of 119
+        tab.resize(term_size(120, 24));
+        assert_eq!(pane_widths(&tab), vec![63, 56]);
+    }
+
+    #[test]
+    fn a_squeezed_split_keeps_its_share_when_the_panes_that_squeezed_it_close() {
+        let size = term_size(40, 24);
+        let tab = Tab::new(&size);
+        tab.assign_pane(&FakePane::new(1, size));
+        let request = SplitRequest {
+            direction: SplitDirection::Horizontal,
+            ..Default::default()
+        };
+        let halves = tab.compute_split_size(0, request).unwrap();
+        tab.split_and_insert(0, request, FakePane::new(2, halves.second))
+            .unwrap();
+        // A row of four panes on the left of pane 2.
+        for id in 3..=5 {
+            let halves = tab.compute_split_size(0, request).unwrap();
+            tab.split_and_insert(0, request, FakePane::new(id, halves.second))
+                .unwrap();
+        }
+        let right_before = *pane_widths(&tab).last().unwrap();
+
+        // The four panes need seven columns, so the share is overridden.
+        tab.resize(term_size(9, 24));
+        assert_eq!(*pane_widths(&tab).last().unwrap(), 1);
+
+        // Closing two of them lowers that minimum without moving the divider.
+        tab.remove_pane(4);
+        tab.remove_pane(3);
+        tab.resize(term_size(40, 24));
+        assert_eq!(*pane_widths(&tab).last().unwrap(), right_before);
+    }
+
+    #[test]
+    fn the_ratio_is_not_sent() {
+        let split = |ratio| SplitDirectionAndSize {
+            direction: SplitDirection::Horizontal,
+            first: term_size(59, 24),
+            second: term_size(60, 24),
+            ratio,
+        };
+        let without = varbincode::serialize(&split(None)).unwrap();
+        let with = varbincode::serialize(&split(Some(SplitRatio {
+            first: 59,
+            total: 119,
+            placed: (59, 60),
+        })))
+        .unwrap();
+        assert_eq!(without, with, "the bytes a peer reads do not depend on it");
+
+        let received: SplitDirectionAndSize = varbincode::deserialize(with.as_slice()).unwrap();
+        assert_eq!(received, split(None));
     }
 
     fn is_send_and_sync<T: Send + Sync>() -> bool {
