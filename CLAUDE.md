@@ -66,9 +66,10 @@ Two rules that are easy to break by accident:
   `BACKLOG.md`, `docs/plans/`, `fork/`) are the sole exception. Engine patches land on `build` only as
   the contents of the `--no-ff` merge commits, conflict resolution included —
   never as a follow-up commit after the merge.
-- **Do not build from a unit branch.** Its binary is missing every other unit,
-  so what you observe is not what the machine runs. Editing and `cargo check`
-  in a unit worktree is fine; never install or prove from one.
+- **Never install a unit-branch build or use it as evidence of what this machine runs.**
+  Build a unit branch to run its own tests and collect its upstream-readiness
+  evidence on throwaway servers. Its binary omits the other units. After
+  merging it, build and verify the integrated `build` branch again.
 
 ## Ready to send upstream
 
