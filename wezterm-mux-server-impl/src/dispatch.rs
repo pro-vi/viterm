@@ -23,6 +23,15 @@ enum Item {
     Readable,
 }
 
+async fn next_item<T: async_io::IoSafe + std::io::Read>(
+    stream: &mut smol::io::BufReader<Async<T>>,
+    items: &smol::channel::Receiver<Item>,
+) -> Result<Item, smol::channel::RecvError> {
+    // Try an actual read before queued work, retaining bytes for PDU decoding.
+    let wait_for_read = stream.fill_buf().map(|_| Ok(Item::Readable));
+    smol::future::or(wait_for_read, items.recv()).await
+}
+
 pub async fn process<T>(stream: T) -> anyhow::Result<()>
 where
     T: 'static,
@@ -36,7 +45,7 @@ where
     process_async(stream).await
 }
 
-pub async fn process_async<T>(mut stream: Async<T>) -> anyhow::Result<()>
+pub async fn process_async<T>(stream: Async<T>) -> anyhow::Result<()>
 where
     T: 'static,
     T: std::io::Read,
@@ -45,6 +54,8 @@ where
     T: async_io::IoSafe,
 {
     log::trace!("process_async called");
+
+    let mut stream = smol::io::BufReader::new(stream);
 
     let (item_tx, item_rx) = smol::channel::unbounded::<Item>();
 
@@ -65,10 +76,7 @@ where
     }
 
     loop {
-        let rx_msg = item_rx.recv();
-        let wait_for_read = stream.readable().map(|_| Ok(Item::Readable));
-
-        match smol::future::or(rx_msg, wait_for_read).await {
+        match next_item(&mut stream, &item_rx).await {
             Ok(Item::Readable) => {
                 let decoded = match Pdu::decode_async(&mut stream, None).await {
                     Ok(data) => data,
@@ -209,5 +217,80 @@ where
                 return Ok(());
             }
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn eof_precedes_ready_notifications_and_writes() {
+        smol::block_on(async {
+            for partial_frame in [false, true] {
+                let (server, mut client) = std::os::unix::net::UnixStream::pair().unwrap();
+                let mut server = smol::io::BufReader::new(Async::new(server).unwrap());
+                if partial_frame {
+                    client.write_all(&[0x80]).unwrap();
+                }
+                drop(client);
+                let (tx, rx) = smol::channel::unbounded();
+                for _ in 0..100 {
+                    tx.try_send(Item::Notif(MuxNotification::PaneOutput(42)))
+                        .unwrap();
+                }
+                tx.try_send(Item::WritePdu(DecodedPdu {
+                    pdu: Pdu::Pong(codec::Pong {}),
+                    serial: 1,
+                }))
+                .unwrap();
+                assert!(matches!(
+                    next_item(&mut server, &rx).await.unwrap(),
+                    Item::Readable
+                ));
+                let error = Pdu::decode_async(&mut server, None).await.unwrap_err();
+                assert_eq!(
+                    error
+                        .root_cause()
+                        .downcast_ref::<std::io::Error>()
+                        .unwrap()
+                        .kind(),
+                    std::io::ErrorKind::UnexpectedEof
+                );
+                assert_eq!(rx.len(), 101);
+            }
+        });
+    }
+
+    #[test]
+    fn buffered_requests_preserve_pdu_bytes_and_queued_replies() {
+        smol::block_on(async {
+            let (server, mut client) = std::os::unix::net::UnixStream::pair().unwrap();
+            let mut server = smol::io::BufReader::new(Async::new(server).unwrap());
+            Pdu::Ping(codec::Ping {}).encode(&mut client, 7).unwrap();
+            let (tx, rx) = smol::channel::unbounded();
+            tx.try_send(Item::WritePdu(DecodedPdu {
+                pdu: Pdu::Pong(codec::Pong {}),
+                serial: 6,
+            }))
+            .unwrap();
+            assert!(matches!(
+                next_item(&mut server, &rx).await.unwrap(),
+                Item::Readable
+            ));
+            assert_eq!(
+                server.fill_buf().await.unwrap()[0],
+                2,
+                "PDU length byte was consumed"
+            );
+            let request = Pdu::decode_async(&mut server, None).await.unwrap();
+            assert_eq!(request.serial, 7);
+            assert!(matches!(request.pdu, Pdu::Ping(_)));
+            assert!(matches!(
+                next_item(&mut server, &rx).await.unwrap(),
+                Item::WritePdu(DecodedPdu { serial: 6, .. })
+            ));
+        });
     }
 }
