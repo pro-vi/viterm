@@ -10,6 +10,7 @@ use mux::tab::TabId;
 use mux::{Mux, MuxNotification};
 use promise::spawn::spawn_into_main_thread;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use termwiz::surface::SequenceNo;
@@ -20,9 +21,14 @@ use wezterm_term::StableRowIndex;
 #[derive(Clone)]
 pub struct PduSender {
     func: Arc<dyn Fn(DecodedPdu) -> anyhow::Result<()> + Send + Sync>,
+    connected: Arc<AtomicBool>,
 }
 
 impl PduSender {
+    fn is_connected(&self) -> bool {
+        self.connected.load(Ordering::Acquire)
+    }
+
     pub fn send(&self, pdu: DecodedPdu) -> anyhow::Result<()> {
         (self.func)(pdu)
     }
@@ -31,7 +37,10 @@ impl PduSender {
     where
         T: Fn(DecodedPdu) -> anyhow::Result<()> + Send + Sync + 'static,
     {
-        Self { func: Arc::new(f) }
+        Self {
+            func: Arc::new(f),
+            connected: Arc::new(AtomicBool::new(true)),
+        }
     }
 }
 
@@ -148,6 +157,9 @@ fn maybe_push_pane_changes(
     sender: PduSender,
     per_pane: Arc<Mutex<PerPane>>,
 ) -> anyhow::Result<()> {
+    if !sender.is_connected() {
+        return Ok(());
+    }
     let mut per_pane = per_pane.lock().unwrap();
     if let Some(resp) = per_pane.compute_changes(pane, None) {
         sender.send(DecodedPdu {
@@ -196,6 +208,21 @@ fn maybe_push_pane_changes(
     Ok(())
 }
 
+fn push_pane_changes(
+    pane_id: PaneId,
+    sender: PduSender,
+    per_pane: Arc<Mutex<PerPane>>,
+) -> anyhow::Result<()> {
+    // Queued main-thread work can outlive the connection that requested it.
+    if !sender.is_connected() {
+        return Ok(());
+    }
+    let pane = Mux::get()
+        .get_pane(pane_id)
+        .ok_or_else(|| anyhow!("no such pane {}", pane_id))?;
+    maybe_push_pane_changes(&pane, sender, per_pane)
+}
+
 pub struct SessionHandler {
     to_write_tx: PduSender,
     per_pane: HashMap<TabId, Arc<Mutex<PerPane>>>,
@@ -203,8 +230,27 @@ pub struct SessionHandler {
     proxy_client_id: Option<ClientId>,
 }
 
+#[cfg(test)]
+mod connection_tests {
+    use super::*;
+
+    #[test]
+    fn queued_render_work_stops_before_accessing_mux_after_disconnect() {
+        let sender = PduSender::new(|_| panic!("disconnected sender was used"));
+        let handler = SessionHandler::new(sender.clone());
+        let state = Arc::new(Mutex::new(PerPane::default()));
+        assert!(sender.is_connected());
+        drop(handler);
+        assert!(!sender.is_connected());
+        // There is deliberately no Mux on this thread. Accessing it would
+        // show that queued work proceeded past the connection check.
+        push_pane_changes(42, sender, state).unwrap();
+    }
+}
+
 impl Drop for SessionHandler {
     fn drop(&mut self) {
+        self.to_write_tx.connected.store(false, Ordering::Release);
         if let Some(client_id) = self.client_id.take() {
             let mux = Mux::get();
             mux.unregister_client(&client_id);
@@ -233,15 +279,8 @@ impl SessionHandler {
     pub fn schedule_pane_push(&mut self, pane_id: PaneId) {
         let sender = self.to_write_tx.clone();
         let per_pane = self.per_pane(pane_id);
-        spawn_into_main_thread(async move {
-            let mux = Mux::get();
-            let pane = mux
-                .get_pane(pane_id)
-                .ok_or_else(|| anyhow!("no such pane {}", pane_id))?;
-            maybe_push_pane_changes(&pane, sender, per_pane)?;
-            Ok::<(), anyhow::Error>(())
-        })
-        .detach();
+        spawn_into_main_thread(async move { push_pane_changes(pane_id, sender, per_pane) })
+            .detach();
     }
 
     pub fn process_one(&mut self, decoded: DecodedPdu) {
@@ -676,7 +715,10 @@ impl SessionHandler {
                             // cursor position so that the predictive echo doesn't
                             // leave the cursor in the wrong place
                             let mut per_pane = per_pane.lock().unwrap();
-                            if let Some(resp) = per_pane.compute_changes(&pane, Some(input_serial))
+                            if let Some(resp) = sender
+                                .is_connected()
+                                .then(|| per_pane.compute_changes(&pane, Some(input_serial)))
+                                .flatten()
                             {
                                 sender.send(DecodedPdu {
                                     pdu: Pdu::GetPaneRenderChangesResponse(resp),
