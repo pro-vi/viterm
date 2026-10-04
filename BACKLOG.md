@@ -41,12 +41,20 @@ Named `tabbar-title-memo` until 2026-10-02; plans written before then use that n
 - why: `adjust_x_size` and `adjust_y_size` return at once for a zero cell delta, so a split whose cell count does not change keeps the pixel sizes and dpi it had, though the window's pixels per cell changed. Probe 2026-10-04: a split 5 columns wide (two panes of 2) beside a 94-column pane, resized from 100 to 102 columns at 20 pixels per column instead of 10. On `resync-no-resize-echo` one of the two small panes kept 20 pixels where 40 was expected; with `split-resize-keeps-ratio` both do, because a small split's share now often rounds to the same cell count while the window grows. Found by a code review of that unit
 - notes: none
 
-### `recenter-drifted-splits`
+### `cli-adjust-pane-size-not-shown`
 
-- side: gui (tooling, possibly no engine change)
+- side: gui
 - state: proposed
-- needs: the owner's go; it changes live pane sizes
-- why: splits drifted off-center through the echo loop the plan above removes (every split was 77|78 on 2026-09-27; on 2026-10-02 most were 83|89, one 93|79, two 74|98). The fix stops new drift and does not undo old drift. A one-time pass with `wezterm cli adjust-pane-size`, or a key that evens the splits of the active tab, would
+- needs: a harness scenario that runs `wezterm cli adjust-pane-size` against the server and reads the GUI's `list`, to show whether it is real
+- why: by reading the code, 2026-10-04, not run: `Pdu::AdjustPaneSize` changes the server's tab (`wezterm-mux-server-impl/src/sessionhandler.rs`), the server announces `TabResized`, and the GUI re-reads the tree. Since `resync-no-resize-echo`, `sync_with_pane_tree` keeps the GUI's own sizes when the same panes are split the same way, so the change would not show, and the GUI's next resize would send its sizes back over it. Upstream replaces the GUI's tree with the server's on every re-read (`upstream/main`, `Tab::sync_with_pane_tree`), so there it shows. The plan's requirement R5 lists a split, spawn, close and zoom made outside the GUI, not a size change
+- notes: none
+
+### `resync-sends-three-resizes-at-attach`
+
+- side: gui
+- state: proposed
+- needs: which three `Resize` messages they are, and why the harness does not reproduce them
+- why: `mux.client.send.Resize.in_resync` reads 3 in the first stats table after every attach and stays 3 while hundreds of resizes follow: at 20:31 on 2026-10-03 (the GUI spawned a fresh mux server) and at 03:41 on 2026-10-04 (a server that had been running since 00:55), so a cold server does not explain it. The plan's live check expects 0. The harness `no-echo` check passes in all five scenarios, `attach` included
 - notes: none
 
 ### `uservars-replay-on-attach`
