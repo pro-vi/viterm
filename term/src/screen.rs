@@ -3,7 +3,7 @@
 use super::*;
 use crate::config::BidiMode;
 use log::debug;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use termwiz::input::KeyboardEncoding;
 use wezterm_surface::SequenceNo;
@@ -23,6 +23,7 @@ pub struct Screen {
     /// popped off the front of the screen when a new line is added that
     /// would otherwise have exceeded the line capacity
     lines: VecDeque<Line>,
+    dirty_rows: DirtyRowIndex,
 
     /// Whenever we scroll a line off the top of the scrollback, we
     /// increment this.  We use this offset to translate between
@@ -47,11 +48,400 @@ pub struct Screen {
     pub(crate) saved_cursor: Option<SavedCursor>,
 }
 
+const ROWS_PER_BLOCK: StableRowIndex = 64;
+
+#[derive(Debug, Clone, Default)]
+struct DirtyRowIndex {
+    blocks: BTreeMap<StableRowIndex, SequenceNo>,
+    maxima: BTreeSet<(SequenceNo, StableRowIndex)>,
+    always_dirty: BTreeSet<StableRowIndex>,
+    invalid: BTreeSet<StableRowIndex>,
+    bounds: Option<Range<StableRowIndex>>,
+    #[cfg(test)]
+    inspected_rows: usize,
+}
+
+impl DirtyRowIndex {
+    fn invalidate(&mut self, rows: Range<StableRowIndex>) {
+        let Some(bounds) = &self.bounds else { return };
+        if rows.is_empty() || bounds.is_empty() {
+            return;
+        }
+        // Only cached blocks can have stale summaries. This also bounds the
+        // invalidation set when output continues with no dirty-row queries.
+        let first = (rows.start / ROWS_PER_BLOCK).max(bounds.start / ROWS_PER_BLOCK);
+        let last = ((rows.end - 1) / ROWS_PER_BLOCK).min((bounds.end - 1) / ROWS_PER_BLOCK);
+        self.invalid.extend(first..=last);
+    }
+
+    fn remove(&mut self, block: StableRowIndex) {
+        if let Some(maximum) = self.blocks.remove(&block) {
+            self.maxima.remove(&(maximum, block));
+        }
+        self.always_dirty.remove(&block);
+    }
+
+    fn refresh(&mut self, lines: &VecDeque<Line>, offset: StableRowIndex) {
+        let end = offset + lines.len() as StableRowIndex;
+        if lines.is_empty() {
+            *self = Self::default();
+            return;
+        }
+        let first = offset / ROWS_PER_BLOCK;
+        let last = (end - 1) / ROWS_PER_BLOCK;
+        let obsolete: Vec<_> = self
+            .blocks
+            .range(..first)
+            .chain(self.blocks.range((last + 1)..))
+            .map(|(&block, _)| block)
+            .collect();
+        for block in obsolete {
+            self.remove(block);
+        }
+        self.invalid
+            .retain(|&block| block >= first && block <= last);
+
+        match self.bounds.clone() {
+            None => self.invalid.extend(first..=last),
+            Some(previous) => {
+                if offset != previous.start {
+                    self.invalid.insert(first);
+                }
+                if end != previous.end {
+                    self.invalid.insert(last);
+                }
+                if offset < previous.start {
+                    self.invalid
+                        .extend(first..=(previous.start / ROWS_PER_BLOCK).min(last));
+                }
+                if end > previous.end {
+                    self.invalid
+                        .extend((previous.end / ROWS_PER_BLOCK).max(first)..=last);
+                }
+            }
+        }
+        self.bounds = Some(offset..end);
+        while let Some(block) = self.invalid.pop_first() {
+            self.remove(block);
+            let start = (block * ROWS_PER_BLOCK).max(offset);
+            let finish = (block * ROWS_PER_BLOCK)
+                .saturating_add(ROWS_PER_BLOCK)
+                .min(end);
+            let mut maximum = 0;
+            let mut zero = false;
+            for row in start..finish {
+                let seqno = lines[(row - offset) as usize].current_seqno();
+                maximum = maximum.max(seqno);
+                zero |= seqno == 0;
+                #[cfg(test)]
+                {
+                    self.inspected_rows += 1;
+                }
+            }
+            self.blocks.insert(block, maximum);
+            self.maxima.insert((maximum, block));
+            if zero {
+                self.always_dirty.insert(block);
+            }
+        }
+    }
+
+    fn candidates(
+        &self,
+        rows: Range<StableRowIndex>,
+        seqno: SequenceNo,
+    ) -> BTreeSet<StableRowIndex> {
+        use std::ops::Bound::{Excluded, Unbounded};
+        let first = rows.start / ROWS_PER_BLOCK;
+        let last = (rows.end - 1) / ROWS_PER_BLOCK;
+        self.maxima
+            .range((Excluded((seqno, StableRowIndex::MAX)), Unbounded))
+            .map(|&(_, block)| block)
+            .chain(self.always_dirty.range(first..=last).copied())
+            .filter(|&block| block >= first && block <= last)
+            .collect()
+    }
+}
+
 fn scrollback_size(config: &Arc<dyn TerminalConfiguration>, allow_scrollback: bool) -> usize {
     if allow_scrollback {
         config.scrollback_size()
     } else {
         0
+    }
+}
+
+#[cfg(test)]
+mod dirty_row_tests {
+    use super::*;
+    use crate::color::ColorPalette;
+
+    #[derive(Debug)]
+    struct HistoryConfig(usize);
+
+    impl TerminalConfiguration for HistoryConfig {
+        fn scrollback_size(&self) -> usize {
+            self.0
+        }
+        fn color_palette(&self) -> ColorPalette {
+            ColorPalette::default()
+        }
+    }
+
+    fn screen(history: usize, alternate: bool) -> Screen {
+        let config: Arc<dyn TerminalConfiguration> = Arc::new(HistoryConfig(history));
+        let mut screen = Screen::new(
+            TerminalSize {
+                rows: 50,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+                dpi: 96,
+            },
+            &config,
+            !alternate,
+            1,
+            config.bidi_mode(),
+        );
+        if !alternate {
+            screen.lines.extend((0..history).map(|_| Line::new(1)));
+        }
+        screen
+    }
+
+    fn reference(
+        screen: &Screen,
+        rows: Range<StableRowIndex>,
+        seqno: SequenceNo,
+    ) -> Vec<StableRowIndex> {
+        let phys = screen.stable_range(&rows);
+        screen
+            .lines
+            .iter()
+            .enumerate()
+            .skip(phys.start)
+            .take(phys.end - phys.start)
+            .filter(|(_, line)| line.changed_since(seqno))
+            .map(|(index, _)| screen.phys_to_stable_row_index(index))
+            .collect()
+    }
+
+    fn assert_reference(screen: &mut Screen) {
+        let first = screen.phys_to_stable_row_index(0);
+        let last = first + screen.lines.len() as StableRowIndex;
+        for rows in [0..last, first..first + 1, last - 1..last, last..last] {
+            for seqno in [0, 1, 2, 5, 20, SequenceNo::MAX] {
+                let expected = reference(screen, rows.clone(), seqno);
+                assert_eq!(
+                    screen.get_changed_stable_rows(rows.clone(), seqno),
+                    expected,
+                    "range {rows:?}, seqno {seqno}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_updates_do_not_walk_unchanged_history() {
+        let mut screen = screen(200_000, false);
+        let end = screen.lines.len() as StableRowIndex;
+        assert_eq!(
+            screen.get_changed_stable_rows(0..end, 0).len(),
+            screen.lines.len()
+        );
+        screen.dirty_line(49, 2);
+        screen.dirty_rows.inspected_rows = 0;
+        assert_eq!(screen.get_changed_stable_rows(0..end, 1), vec![end - 1]);
+        assert!(screen.dirty_rows.inspected_rows <= 2 * ROWS_PER_BLOCK as usize);
+        screen.dirty_rows.inspected_rows = 0;
+        assert!(screen.get_changed_stable_rows(0..end, 2).is_empty());
+        assert_eq!(screen.dirty_rows.inspected_rows, 0);
+    }
+
+    #[test]
+    fn historical_mutation_row_replacement_and_zero_sequence_match_full_scan() {
+        let mut screen = screen(256, false);
+        assert_reference(&mut screen);
+        screen.line_mut(0).update_last_change_seqno(3);
+        screen.line_mut(130).update_last_change_seqno(20);
+        assert_reference(&mut screen);
+        *screen.line_mut(130) = Line::new(0);
+        *screen.line_mut(64) = Line::new(1);
+        assert_reference(&mut screen);
+    }
+
+    #[test]
+    fn mutable_callbacks_and_expanded_logical_lines_match_full_scan() {
+        let mut screen = screen(256, false);
+        assert_reference(&mut screen);
+        screen.with_phys_lines_mut(10..20, |lines| {
+            for line in lines {
+                line.update_last_change_seqno(3);
+            }
+        });
+        assert_reference(&mut screen);
+        screen.line_mut(127).set_last_cell_was_wrapped(true, 2);
+        assert_reference(&mut screen);
+        screen.for_each_logical_line_in_stable_range_mut(128..129, |_, lines| {
+            for line in lines {
+                line.update_last_change_seqno(5);
+            }
+            true
+        });
+        assert_reference(&mut screen);
+        screen.for_each_phys_line_mut(|index, line| {
+            if index % 3 == 0 {
+                line.update_last_change_seqno(20);
+            }
+        });
+        assert_reference(&mut screen);
+    }
+
+    #[test]
+    fn scrolling_eviction_erase_and_reflow_match_full_scan() {
+        for alternate in [false, true] {
+            let mut screen = screen(256, alternate);
+            let bidi = screen.config.bidi_mode();
+            assert_reference(&mut screen);
+            for seqno in 2..22 {
+                screen.scroll_up(&(0..50), 1, seqno, CellAttributes::blank(), bidi);
+                assert_reference(&mut screen);
+            }
+            screen.scroll_down(&(10..20), 3, 22, CellAttributes::blank(), bidi);
+            assert_reference(&mut screen);
+            screen.erase_scrollback();
+            assert_reference(&mut screen);
+            screen.resize(
+                TerminalSize {
+                    rows: 40,
+                    cols: 60,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                    dpi: 96,
+                },
+                CursorPosition::default(),
+                23,
+                false,
+            );
+            assert_reference(&mut screen);
+        }
+    }
+
+    #[test]
+    fn output_without_queries_cannot_grow_pending_invalidation_forever() {
+        let mut screen = screen(256, false);
+        let bidi = screen.config.bidi_mode();
+        assert_reference(&mut screen);
+        let cached = screen.dirty_rows.blocks.len();
+        for _ in 0..10_000 {
+            screen.scroll_up(&(0..50), 1, 2, CellAttributes::blank(), bidi);
+            assert!(screen.dirty_rows.invalid.len() <= cached);
+        }
+        assert_reference(&mut screen);
+        assert!(screen.dirty_rows.blocks.len() <= screen.lines.len() / ROWS_PER_BLOCK as usize + 2);
+    }
+
+    #[test]
+    fn partial_top_scroll_preserves_tail_block_sequences() {
+        for tail_seqno in [20, 0] {
+            let config: Arc<dyn TerminalConfiguration> = Arc::new(HistoryConfig(256));
+            let mut screen = Screen::new(
+                TerminalSize {
+                    rows: 128,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                    dpi: 96,
+                },
+                &config,
+                true,
+                1,
+                config.bidi_mode(),
+            );
+            screen.lines.extend((0..256).map(|_| Line::new(1)));
+            *screen.line_mut(319) = Line::new(tail_seqno);
+            assert_reference(&mut screen);
+            screen.scroll_up(&(0..20), 1, 21, CellAttributes::blank(), config.bidi_mode());
+            assert_eq!(reference(&screen, 0..385, 1), vec![276, 320]);
+            assert_reference(&mut screen);
+        }
+    }
+
+    #[test]
+    fn multi_row_partial_top_scroll_indexes_new_blank_rows() {
+        let config: Arc<dyn TerminalConfiguration> = Arc::new(HistoryConfig(256));
+        let mut screen = Screen::new(
+            TerminalSize {
+                rows: 128,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+                dpi: 96,
+            },
+            &config,
+            true,
+            1,
+            config.bidi_mode(),
+        );
+        screen.lines.extend((0..256).map(|_| Line::new(1)));
+        assert_reference(&mut screen);
+        screen.scroll_up(
+            &(0..64),
+            64,
+            21,
+            CellAttributes::blank(),
+            config.bidi_mode(),
+        );
+        assert_eq!(
+            reference(&screen, 0..448, 1),
+            (320..384).collect::<Vec<_>>()
+        );
+        assert_reference(&mut screen);
+    }
+
+    #[test]
+    fn wrapped_deque_margin_scroll_and_nonblank_reflow_match_full_scan() {
+        let mut screen = screen(256, false);
+        let bidi = screen.config.bidi_mode();
+        assert_reference(&mut screen);
+        for _ in 0..400 {
+            screen.scroll_up(&(0..50), 1, 2, CellAttributes::blank(), bidi);
+        }
+        assert!(
+            !screen.lines.as_slices().1.is_empty(),
+            "fixture must wrap the deque"
+        );
+        assert_reference(&mut screen);
+        screen.with_phys_lines_mut(40..80, |lines| {
+            for line in lines {
+                line.update_last_change_seqno(20);
+            }
+        });
+        assert_reference(&mut screen);
+        screen.scroll_up_within_margins(&(0..30), &(5..20), 3, 21, CellAttributes::blank(), bidi);
+        assert_reference(&mut screen);
+        screen.scroll_down_within_margins(&(0..30), &(5..20), 2, 22, CellAttributes::blank(), bidi);
+        assert_reference(&mut screen);
+        for x in 0..80 {
+            screen.set_cell_grapheme(x, 0, "x", 1, CellAttributes::blank(), 23);
+            screen.set_cell_grapheme(x, 1, "y", 1, CellAttributes::blank(), 23);
+        }
+        let top = screen.phys_row(0);
+        screen.line_mut(top).set_last_cell_was_wrapped(true, 23);
+        assert_reference(&mut screen);
+        screen.resize(
+            TerminalSize {
+                rows: 40,
+                cols: 60,
+                pixel_width: 0,
+                pixel_height: 0,
+                dpi: 96,
+            },
+            CursorPosition::default(),
+            24,
+            false,
+        );
+        assert_reference(&mut screen);
     }
 }
 
@@ -87,6 +477,7 @@ impl Screen {
             dpi: size.dpi,
             keyboard_stack: vec![],
             saved_cursor: None,
+            dirty_rows: DirtyRowIndex::default(),
         }
     }
 
@@ -106,6 +497,7 @@ impl Screen {
         cursor_y: PhysRowIndex,
         seqno: SequenceNo,
     ) -> (usize, PhysRowIndex) {
+        self.dirty_rows = DirtyRowIndex::default();
         let mut rewrapped = VecDeque::new();
         let mut logical_line: Option<Line> = None;
         let mut logical_cursor_x: Option<usize> = None;
@@ -207,6 +599,7 @@ impl Screen {
         {
             return cursor;
         }
+        self.dirty_rows = DirtyRowIndex::default();
         log::debug!(
             "resize screen to {physical_cols}x{physical_rows} dpi={}",
             size.dpi
@@ -326,9 +719,16 @@ impl Screen {
         }
     }
 
+    fn invalidate_phys_rows(&mut self, rows: Range<PhysRowIndex>) {
+        let offset = self.phys_to_stable_row_index(0);
+        self.dirty_rows
+            .invalidate(offset + rows.start as StableRowIndex..offset + rows.end as StableRowIndex);
+    }
+
     /// Get mutable reference to a line, relative to start of scrollback.
     #[inline]
     pub fn line_mut(&mut self, idx: PhysRowIndex) -> &mut Line {
+        self.invalidate_phys_rows(idx..idx + 1);
         &mut self.lines[idx]
     }
 
@@ -342,7 +742,7 @@ impl Screen {
     pub fn dirty_line(&mut self, idx: VisibleRowIndex, seqno: SequenceNo) {
         let line_idx = self.phys_row(idx);
         if line_idx < self.lines.len() {
-            self.lines[line_idx].update_last_change_seqno(seqno);
+            self.line_mut(line_idx).update_last_change_seqno(seqno);
         }
     }
 
@@ -425,6 +825,7 @@ impl Screen {
 
     pub fn cell_mut(&mut self, x: usize, y: VisibleRowIndex) -> Option<&mut Cell> {
         let line_idx = self.phys_row(y);
+        self.invalidate_phys_rows(line_idx..line_idx + 1);
         let line = self.lines.get_mut(line_idx)?;
         line.cells_mut().get_mut(x)
     }
@@ -568,6 +969,7 @@ impl Screen {
 
         // Need to do the slower, more complex left and right bounded scroll
         let phys_scroll = self.phys_range(scroll_region);
+        self.invalidate_phys_rows(phys_scroll.clone());
 
         // The scroll is really a copy + a clear operation
         let region_height = phys_scroll.end - phys_scroll.start;
@@ -652,6 +1054,7 @@ impl Screen {
         bidi_mode: BidiMode,
     ) {
         let phys_scroll = self.phys_range(scroll_region);
+        self.invalidate_phys_rows(phys_scroll.clone());
         let num_rows = num_rows.min(phys_scroll.end - phys_scroll.start);
         let scrollback_ok = scroll_region.start == 0 && self.allow_scrollback;
         let insert_at_end = scroll_region.end as usize == self.physical_rows;
@@ -758,9 +1161,17 @@ impl Screen {
                 self.line_mut(y).update_last_change_seqno(seqno);
             }
         }
+        // Reusing rows can move both the newly blank rows and the tail into
+        // different stable blocks. Invalidate their post-scroll membership too.
+        self.invalidate_phys_rows(
+            self.phys_range(&(scroll_region.start..self.physical_rows as VisibleRowIndex)),
+        );
     }
 
     pub fn erase_scrollback(&mut self) {
+        if !self.allow_scrollback {
+            self.dirty_rows = DirtyRowIndex::default();
+        }
         let len = self.lines.len();
         let to_clear = len - self.physical_rows;
         for _ in 0..to_clear {
@@ -793,6 +1204,7 @@ impl Screen {
     ) {
         debug!("scroll_down {:?} {}", scroll_region, num_rows);
         let phys_scroll = self.phys_range(scroll_region);
+        self.invalidate_phys_rows(phys_scroll.clone());
         let num_rows = num_rows.min(phys_scroll.end - phys_scroll.start);
 
         let middle = phys_scroll.end - num_rows;
@@ -838,6 +1250,7 @@ impl Screen {
 
         // Need to do the slower, more complex left and right bounded scroll
         let phys_scroll = self.phys_range(scroll_region);
+        self.invalidate_phys_rows(phys_scroll.clone());
 
         // The scroll is really a copy + a clear operation
         let region_height = phys_scroll.end - phys_scroll.start;
@@ -908,24 +1321,34 @@ impl Screen {
     }
 
     pub fn get_changed_stable_rows(
-        &self,
+        &mut self,
         stable_lines: Range<StableRowIndex>,
         seqno: SequenceNo,
     ) -> Vec<StableRowIndex> {
         let phys = self.stable_range(&stable_lines);
-        let mut set = vec![];
-        for (idx, line) in self
-            .lines
-            .iter()
-            .enumerate()
-            .skip(phys.start)
-            .take(phys.end - phys.start)
-        {
-            if line.changed_since(seqno) {
-                set.push(self.phys_to_stable_row_index(idx))
+        if phys.is_empty() {
+            return Vec::new();
+        }
+        let offset = self.phys_to_stable_row_index(0);
+        self.dirty_rows.refresh(&self.lines, offset);
+        let wanted = offset + phys.start as StableRowIndex..offset + phys.end as StableRowIndex;
+        let mut changed = Vec::new();
+        for block in self.dirty_rows.candidates(wanted.clone(), seqno) {
+            let first = (block * ROWS_PER_BLOCK).max(wanted.start);
+            let last = (block * ROWS_PER_BLOCK)
+                .saturating_add(ROWS_PER_BLOCK)
+                .min(wanted.end);
+            for row in first..last {
+                #[cfg(test)]
+                {
+                    self.dirty_rows.inspected_rows += 1;
+                }
+                if self.lines[(row - offset) as usize].changed_since(seqno) {
+                    changed.push(row);
+                }
             }
         }
-        set
+        changed
     }
 
     pub fn with_phys_lines<F>(&self, phys_range: Range<PhysRowIndex>, mut func: F)
@@ -952,6 +1375,7 @@ impl Screen {
     where
         F: FnMut(&mut [&mut Line]),
     {
+        self.invalidate_phys_rows(phys_range.clone());
         let (first, second) = self.lines.as_mut_slices();
         let first_len = first.len();
         let first_range = 0..first.len();
@@ -984,6 +1408,7 @@ impl Screen {
     where
         F: FnMut(usize, &mut Line),
     {
+        self.dirty_rows = DirtyRowIndex::default();
         for (idx, line) in self.lines.iter_mut().enumerate() {
             f(idx, line);
         }

@@ -65,7 +65,7 @@ pub fn terminal_get_dirty_lines(
     lines: Range<StableRowIndex>,
     seqno: SequenceNo,
 ) -> RangeSet<StableRowIndex> {
-    let screen = term.screen();
+    let screen = term.screen_mut();
     let lines = screen.get_changed_stable_rows(lines, seqno);
     let mut set = RangeSet::new();
     for line in lines {
