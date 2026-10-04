@@ -70,6 +70,38 @@ Two rules that are easy to break by accident:
   so what you observe is not what the machine runs. Editing and `cargo check`
   in a unit worktree is fine; never install or prove from one.
 
+## Ready to send upstream
+
+Units of ours are held back and sent upstream together, at a time the owner
+picks. Each one must therefore be in a state where it could go out the day that
+decision is made, and the ledger must say which units are. A unit is ready to
+send when all of these hold:
+
+1. It is one change, on current `upstream/main` or on the unit it cannot
+   compile without (*Adding a change*).
+2. Its commit message is written for an upstream reader.
+3. On a checkout of the unit branch, `cargo fmt --all -- --check` passes and
+   `cargo test` passes for every crate it touches. Upstream's `CONTRIBUTING.md`
+   asks for both before a pull request.
+4. It adds a test that fails without the change, or its ledger row says in one
+   line why no test fits. Upstream asks for tests that cover the change.
+5. Behavior a Lua config can see (a new option or method, or a change in what a
+   callback receives) is described in `docs/`. Upstream asks for docs when
+   behavior changes.
+6. The evidence in its proving-test column was taken from a build of the unit
+   branch itself, not from `build`, where other units change the result.
+7. `fork/upstream/<slug>.md` holds the pull request text: the problem, the
+   change, the evidence, how the change was made (saying plainly when an AI
+   agent wrote or measured it) and what the owner tested by hand. A maintainer
+   asked for exactly that account on wezterm/wezterm#8086.
+
+A unit of ours ends its ledger status in `ready to send` when all seven hold,
+and otherwise in `not ready:` followed by the numbers not yet shown to hold
+(`not ready: 3 4 6 7`). A number leaves that list only when its check has been
+run on the unit branch; a check nobody has run counts as failing. Carried
+units, diagnostic units and work in progress carry no marker. Being ready
+changes nothing else: nothing is sent until the owner says so.
+
 ## Merging units into `build`
 
 `build` is `upstream/main` plus `git merge --no-ff` of each active unit, plus
