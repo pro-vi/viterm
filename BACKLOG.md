@@ -22,7 +22,7 @@ Named `tabbar-title-memo` until 2026-10-02; plans written before then use that n
 - side: gui
 - state: proposed
 - needs: Open question: whether the OSC 0 double alert is fixed inside this unit or as a unit of its own
-- why: Marshal-once is `pr-8131-tabbar-lua-once`. Remaining: memoize each tab title on its inputs, coalesce title updates in one event-loop turn, and the OSC 0 double-alert (`2026-09-07-osc0-double-alert-no-title-coalescing.md`). With a `format-tab-title` handler registered, one title notification still rebuilds every tab and still converts the whole config into a Lua table. The size of the remaining benefit is unmeasured until it is built
+- why: Marshal-once is `pr-8131-tabbar-lua-once`. Remaining: memoize each tab title on its inputs, coalesce title updates in one event-loop turn, and the OSC 0 double-alert (`2026-09-07-osc0-double-alert-no-title-coalescing.md`). With a `format-tab-title` handler registered, one title notification still rebuilds every tab; `tab-bar-config-once` converts the config into Lua once per rebuild rather than once per call. The size of the remaining benefit is unmeasured until it is built
 - notes: `2026-09-07-tab-title-rebuild-config-conversion-cost.md`, `2026-09-07-osc0-double-alert-no-title-coalescing.md`
 
 ### `split-resize-keeps-ratio`
