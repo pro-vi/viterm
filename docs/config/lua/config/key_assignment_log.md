@@ -11,6 +11,10 @@ appends one line of JSON to that file. The line names the binding, not
 the text: ordinary typing that matches no key assignment writes nothing.
 The directory is created if it does not exist.
 
+On macOS, a key assignment that also appears in the menu bar is
+activated through the menu when its key is pressed; that press is
+logged too. Choosing the same menu item with the mouse is not.
+
 ```lua
 config.key_assignment_log = wezterm.home_dir .. '/.local/state/wezterm/keys.jsonl'
 ```

@@ -960,9 +960,12 @@ impl TermWindow {
                 self.config_was_reloaded();
                 Ok(true)
             }
-            WindowEvent::PerformKeyAssignment(action) => {
+            WindowEvent::PerformKeyAssignment(action, key) => {
                 if let Some(pane) = self.get_active_pane_or_overlay() {
                     self.perform_key_assignment(&pane, &action)?;
+                    if let Some((key, mods)) = key {
+                        self.log_key_assignment(&key, mods, None, &action);
+                    }
                     window.invalidate();
                 }
                 Ok(true)
