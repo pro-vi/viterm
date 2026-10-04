@@ -322,6 +322,7 @@ As features stabilize some brief notes about them will accumulate here.
 * IME: committed text is now handled correctly in prompt overlays such as
   `PromptInputLine` and the debug overlay. Thanks to @dyxushuai! #7556
 
+* Dirty-row queries skip unchanged scrollback blocks while preserving per-line change sequence semantics.
 #### Updated
 * Bundled conpty.dll and OpenConsole.exe to build 1.22.250204002.nupkg
 * Bundled harfbuzz to 11.2.1
