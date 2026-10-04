@@ -49,14 +49,6 @@ Named `tabbar-title-memo` until 2026-10-02; plans written before then use that n
 - why: by reading the code, 2026-10-04, not run: `Pdu::AdjustPaneSize` changes the server's tab (`wezterm-mux-server-impl/src/sessionhandler.rs`), the server announces `TabResized`, and the GUI re-reads the tree. Since `resync-no-resize-echo`, `sync_with_pane_tree` keeps the GUI's own sizes when the same panes are split the same way, so the change would not show, and the GUI's next resize would send its sizes back over it. Upstream replaces the GUI's tree with the server's on every re-read (`upstream/main`, `Tab::sync_with_pane_tree`), so there it shows. The plan's requirement R5 lists a split, spawn, close and zoom made outside the GUI, not a size change
 - notes: none
 
-### `resync-sends-three-resizes-at-attach`
-
-- side: gui
-- state: proposed
-- needs: which three `Resize` messages they are, and why the harness does not reproduce them
-- why: `mux.client.send.Resize.in_resync` reads 3 in the first stats table after every attach and stays 3 while hundreds of resizes follow: at 20:31 on 2026-10-03 (the GUI spawned a fresh mux server) and at 03:41 on 2026-10-04 (a server that had been running since 00:55), so a cold server does not explain it. The plan's live check expects 0. The harness `no-echo` check passes in all five scenarios, `attach` included
-- notes: none
-
 ### `uservars-replay-on-attach`
 
 - side: protocol
