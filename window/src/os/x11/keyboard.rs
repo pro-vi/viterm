@@ -295,6 +295,7 @@ impl KeyboardWithFallback {
             modifiers: raw_modifiers,
             leds,
             repeat_count: 1,
+            is_repeat: false,
             key_is_down: pressed,
             handled: handled.clone(),
         };

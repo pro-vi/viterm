@@ -1324,6 +1324,10 @@ pub struct RawKeyEvent {
     /// How many times this key repeats
     pub repeat_count: u16,
 
+    /// True when the platform reported this key down as the automatic
+    /// repeat of a key being held. Only macOS reports it; elsewhere false.
+    pub is_repeat: bool,
+
     /// If true, this is a key down rather than a key up event
     pub key_is_down: bool,
     pub handled: Handled,
@@ -2492,6 +2496,7 @@ mod test {
                     #[cfg(windows)]
                     scan_code: 0,
                     repeat_count: 1,
+                    is_repeat: false,
                 }),
                 #[cfg(windows)]
                 win32_uni_char: None,
@@ -2612,6 +2617,7 @@ mod test {
             #[cfg(windows)]
             scan_code: 0,
             repeat_count: 1,
+            is_repeat: false,
             key_is_down: event.key_is_down,
             handled: Handled::new(),
         });

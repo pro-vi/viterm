@@ -246,6 +246,7 @@ impl super::TermWindow {
         mods: Modifiers,
         table: Option<&str>,
         action: &KeyAssignment,
+        repeat: bool,
     ) {
         let Some(path) = self.config.key_assignment_log.clone() else {
             self.key_assignment_log = None;
@@ -276,7 +277,8 @@ impl super::TermWindow {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|elapsed| elapsed.as_secs_f64())
             .unwrap_or(0.0);
-        let mut line = crate::inputmap::key_assignment_log_line(time, &key, mods, table, action);
+        let mut line =
+            crate::inputmap::key_assignment_log_line(time, &key, mods, table, action, repeat);
         line.push('\n');
         if let Err(err) = std::io::Write::write_all(file, line.as_bytes()) {
             log::error!("key_assignment_log {}: {err:#}", path.display());
@@ -294,6 +296,7 @@ impl super::TermWindow {
         leader_mod: Modifiers,
         only_key_bindings: OnlyKeyBindings,
         is_down: bool,
+        is_repeat: bool,
         key_event: Option<&KeyEvent>,
     ) -> bool {
         if is_down && !leader_active {
@@ -365,6 +368,7 @@ impl super::TermWindow {
                         raw_modifiers | leader_mod,
                         table_name.as_deref(),
                         &entry.action,
+                        is_repeat,
                     );
                     context.invalidate();
 
@@ -533,6 +537,7 @@ impl super::TermWindow {
                 leader_mod,
                 OnlyKeyBindings::Yes,
                 key.key_is_down,
+                key.is_repeat,
                 None,
             ) {
                 key.set_handled();
@@ -554,6 +559,7 @@ impl super::TermWindow {
             leader_mod,
             OnlyKeyBindings::Yes,
             key.key_is_down,
+            key.is_repeat,
             None,
         ) {
             key.set_handled();
@@ -575,6 +581,7 @@ impl super::TermWindow {
             leader_mod,
             OnlyKeyBindings::Yes,
             key.key_is_down,
+            key.is_repeat,
             None,
         ) {
             key.set_handled();
@@ -691,6 +698,7 @@ impl super::TermWindow {
             leader_mod,
             OnlyKeyBindings::No,
             window_key.key_is_down,
+            window_key.raw.as_ref().is_some_and(|raw| raw.is_repeat),
             Some(&window_key),
         ) {
             return;

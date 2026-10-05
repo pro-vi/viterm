@@ -6,8 +6,9 @@ tags:
 
 {{since('nightly')}}
 
-When set to a file path, each key press that performs a key assignment
-appends one line of JSON to that file. The line names the binding, not
+When set to a file path, each key assignment that a key performs
+appends one line of JSON to that file, the automatic repeats of a held
+key included. The line names the binding, not
 the text: ordinary typing that matches no key assignment writes nothing.
 The directory is created if it does not exist.
 
@@ -22,7 +23,7 @@ config.key_assignment_log = wezterm.home_dir .. '/.local/state/wezterm/keys.json
 Pressing `ALT-SHIFT-h` bound to `ActivatePaneDirection` appends:
 
 ```json
-{"action":"act.ActivatePaneDirection 'Left'","key":"H","mods":"ALT","table":null,"time":1700000000.25}
+{"action":"act.ActivatePaneDirection 'Left'","key":"H","mods":"ALT","repeat":false,"table":null,"time":1700000000.25}
 ```
 
 * `time` is seconds since the Unix epoch.
@@ -34,6 +35,10 @@ Pressing `ALT-SHIFT-h` bound to `ActivatePaneDirection` appends:
 * `action` is the assignment, spelled as `wezterm show-keys --lua`
   spells it. An action created with `wezterm.action_callback` appears as
   the `EmitEvent` it is made of.
+* `repeat` is `true` for a line written by the automatic repeat of a
+  held key: holding a key that runs an assignment writes one line with
+  `false`, then one line with `true` for each repeat. Only macOS reports
+  repeats; on other systems it is always `false`.
 
 The line is written after the assignment has run, so the log does not
 delay it. The file stays open while the path stays the same.

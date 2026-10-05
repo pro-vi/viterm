@@ -2363,7 +2363,8 @@ impl WindowView {
         log::debug!("wezterm_perform_key_assignment {action:?}",);
         // A menu item's shortcut is a key equivalent: macOS hands the key
         // press to the menu, and the window never sees it as a key event.
-        // Pass the key along so the window can still tell it was a key.
+        // Pass the key along so the window can still tell it was a key,
+        // and whether it was the automatic repeat of a held key.
         let key = unsafe {
             let event: id = msg_send![appkit::NSApp(), currentEvent];
             if event != nil && event.eventType() == appkit::NSEventType::NSKeyDown {
@@ -2372,6 +2373,7 @@ impl WindowView {
                     (
                         KeyCode::composed(unmod),
                         key_modifiers(event.modifierFlags()),
+                        from_yes_no(event.isARepeat()),
                     )
                 })
             } else {
@@ -2629,6 +2631,7 @@ impl WindowView {
             leds,
             modifiers,
             repeat_count: 1,
+            is_repeat: is_a_repeat,
             key_is_down,
             handled: raw_key_handled.clone(),
         };

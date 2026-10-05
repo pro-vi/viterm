@@ -943,8 +943,8 @@ impl TermWindow {
             WindowEvent::PerformKeyAssignment(action, key) => {
                 if let Some(pane) = self.get_active_pane_or_overlay() {
                     self.perform_key_assignment(&pane, &action)?;
-                    if let Some((key, mods)) = key {
-                        self.log_key_assignment(&key, mods, None, &action);
+                    if let Some((key, mods, repeat)) = key {
+                        self.log_key_assignment(&key, mods, None, &action, repeat);
                     }
                     window.invalidate();
                 }

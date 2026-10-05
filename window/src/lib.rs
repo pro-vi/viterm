@@ -205,11 +205,12 @@ pub enum WindowEvent {
     DroppedString(String),
 
     /// Called by menubar dispatching stuff on some systems.
-    /// The key and modifiers are present when a key press activated
-    /// the menu item through its shortcut, rather than a mouse click.
+    /// The key, the modifiers and whether the press was the automatic
+    /// repeat of a held key are present when a key press activated the
+    /// menu item through its shortcut, rather than a mouse click.
     PerformKeyAssignment(
         config::keyassignment::KeyAssignment,
-        Option<(KeyCode, Modifiers)>,
+        Option<(KeyCode, Modifiers, bool)>,
     ),
 
     AdviseModifiersLedStatus(Modifiers, KeyboardLedStatus),

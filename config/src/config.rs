@@ -431,8 +431,9 @@ pub struct Config {
     #[dynamic(default)]
     pub debug_key_events: bool,
 
-    /// When set, each key press that performs a key assignment appends
-    /// one JSON line to this file (see docs for `key_assignment_log`)
+    /// When set, each key assignment that a key performs, the automatic
+    /// repeats of a held key included, appends one JSON line to this file
+    /// (see docs for `key_assignment_log`)
     #[dynamic(default)]
     pub key_assignment_log: Option<PathBuf>,
 
