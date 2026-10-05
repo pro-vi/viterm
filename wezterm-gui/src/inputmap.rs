@@ -768,14 +768,16 @@ fn quote_lua_string(s: &str) -> String {
 
 /// One line of `key_assignment_log`: the time in seconds since the Unix
 /// epoch, the key and modifiers of the binding that matched, the key table
-/// that holds it (null for the default table), and the action spelled the
-/// way `wezterm show-keys --lua` spells it.
+/// that holds it (null for the default table), the action spelled the
+/// way `wezterm show-keys --lua` spells it, and whether the press was the
+/// automatic repeat of a held key.
 pub fn key_assignment_log_line(
     time: f64,
     key: &KeyCode,
     mods: Modifiers,
     table: Option<&str>,
     action: &KeyAssignment,
+    repeat: bool,
 ) -> String {
     serde_json::json!({
         "time": time,
@@ -783,6 +785,7 @@ pub fn key_assignment_log_line(
         "mods": format!("{mods:?}").replace(" ", ""),
         "table": table,
         "action": luaify(action.to_dynamic(), true),
+        "repeat": repeat,
     })
     .to_string()
 }
@@ -844,6 +847,7 @@ mod test {
             Modifiers::SHIFT | Modifiers::ALT,
             None,
             &KeyAssignment::ActivatePaneDirection(PaneDirection::Left),
+            false,
         );
         let value: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(
@@ -854,6 +858,7 @@ mod test {
                 "mods": "SHIFT|ALT",
                 "table": null,
                 "action": "act.ActivatePaneDirection 'Left'",
+                "repeat": false,
             })
         );
         assert!(!line.contains('\n'));
@@ -867,10 +872,12 @@ mod test {
             Modifiers::NONE,
             Some("copy_mode"),
             &KeyAssignment::ActivateCopyMode,
+            true,
         );
         let value: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(value["table"], "copy_mode");
         assert_eq!(value["mods"], "NONE");
         assert_eq!(value["action"], "act.ActivateCopyMode");
+        assert_eq!(value["repeat"], true);
     }
 }

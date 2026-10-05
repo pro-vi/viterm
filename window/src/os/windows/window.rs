@@ -2652,6 +2652,7 @@ unsafe fn key(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) -> Option<L
         leds,
         modifiers,
         repeat_count: 1,
+        is_repeat: false,
         key_is_down: !releasing,
         handled: handled_raw.clone(),
     };
