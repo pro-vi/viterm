@@ -4,7 +4,7 @@
 
 use crate::color::{ColorAttribute, PaletteIndex};
 #[cfg(feature = "use_image")]
-use crate::image::ImageCell;
+use crate::image::{ImageCell, ImageData};
 use alloc::sync::Arc;
 use core::hash::{Hash, Hasher};
 use core::mem;
@@ -389,6 +389,17 @@ impl CellAttributes {
                 .retain(|im| !im.matches_placement(image_id, placement_id));
         }
         self.deallocate_fat_attributes_if_none();
+    }
+
+    /// Point every attachment of the given kitty image id at new data.
+    /// Returns true if any attachment was changed.
+    pub fn replace_image_data(&mut self, image_id: u32, data: &Arc<ImageData>) -> bool {
+        match self.fat.as_mut() {
+            Some(fat) => fat.image.iter_mut().fold(false, |replaced, im| {
+                im.replace_data_for_image_id(image_id, data) || replaced
+            }),
+            None => false,
+        }
     }
 
     /// Add an image attachement, preserving any existing attachments.

@@ -599,6 +599,36 @@ impl TerminalState {
         self.kitty_remove_placement_from_model(image_id, placement_id, info);
     }
 
+    /// Placeholder cells hold the image data that was current when they
+    /// were printed. Retransmitting an image under the same id must update
+    /// them in place, since the client won't reprint unchanged placeholders.
+    fn kitty_replace_virtual_image_data(&mut self, image_id: u32, data: &Arc<ImageData>) {
+        if image_id == 0
+            || !self
+                .kitty_img
+                .virtual_placements
+                .keys()
+                .any(|(id, _)| *id == image_id)
+        {
+            return;
+        }
+        let seqno = self.seqno;
+        let screen = self.screen_mut();
+        let first_row = screen.visible_row_to_stable_row(0);
+        let range =
+            screen.stable_range(&(first_row..first_row + screen.physical_rows as StableRowIndex));
+        for idx in range {
+            let line = screen.line_mut(idx);
+            let mut replaced = false;
+            for c in line.cells_mut() {
+                replaced |= c.attrs_mut().replace_image_data(image_id, data);
+            }
+            if replaced {
+                line.update_last_change_seqno(seqno);
+            }
+        }
+    }
+
     fn kitty_remove_placement(&mut self, image_id: u32, placement_id: Option<u32>) {
         if placement_id.is_some() {
             if let Some(info) = self.kitty_img.placements.remove(&(image_id, placement_id)) {
@@ -1146,7 +1176,8 @@ impl TerminalState {
         let img = self
             .raw_image_to_image_data(img)
             .context("storing image data")?;
-        self.kitty_img.record_id_to_data(image_id, img);
+        self.kitty_img.record_id_to_data(image_id, Arc::clone(&img));
+        self.kitty_replace_virtual_image_data(image_id, &img);
 
         if image_number.is_some() {
             self.kitty_send_response(

@@ -248,3 +248,31 @@ fn kitty_frame_edit_keeps_the_stored_hash_current() {
 
     assert_ne!(edited_hash, transmitted_hash);
 }
+
+/// Clients swap what a placeholder grid shows (a video frame, a before /
+/// after toggle) by retransmitting under the same image id and leaving the
+/// placeholder cells alone, which are unchanged text to them. As in kitty,
+/// the cells must show the new image without being reprinted.
+#[test]
+fn kitty_unicode_placeholder_follows_retransmitted_image() {
+    let mut term = TestTerm::new(3, 10, 0);
+
+    let seq = format!("\x1b_Ga=t,i=42,t=d,f=100;{}\x1b\\", TINY_PNG_BASE64);
+    term.print(seq.as_bytes());
+    term.print("\x1b_Ga=p,U=1,i=42,c=2,r=2\x1b\\");
+    term.print("\x1b[38;2;0;0;42m");
+    term.print("\u{10eeee}\u{305}\u{305}\u{10eeee}\u{305}\u{30d}");
+    let printed = first_image(&term).hash();
+    let seqno_before = term.screen().visible_lines()[0].current_seqno();
+
+    let seq = format!("\x1b_Ga=t,i=42,t=d,f=32,s=2,v=2;{}\x1b\\", TINY_RGBA_BASE64);
+    term.print(seq.as_bytes());
+
+    let lines = term.screen().visible_lines();
+    for cell in lines[0].visible_cells().take(2) {
+        let images = cell.attrs().images().expect("image tile attached");
+        assert_ne!(images[0].image_data().hash(), printed);
+    }
+    // The line must be marked changed, or the gui never repaints it
+    assert_ne!(lines[0].current_seqno(), seqno_before);
+}
