@@ -1,6 +1,6 @@
 use crate::terminalstate::image::*;
-use crate::terminalstate::{ImageAttachParams, PlacementInfo};
-use crate::{StableRowIndex, TerminalState, VisibleRowIndex};
+use crate::terminalstate::{ImageAttachParams, PlacementInfo, ScreenKind};
+use crate::{Line, StableRowIndex, TerminalState, VisibleRowIndex};
 use ::image::{
     DynamicImage, GenericImage, GenericImageView, ImageBuffer, RgbImage, Rgba, RgbaImage,
 };
@@ -101,9 +101,10 @@ pub struct KittyImageState {
     placements: HashMap<(u32, Option<u32>), PlacementInfo>,
     virtual_placements: HashMap<(u32, Option<u32>), KittyVirtualPlacement>,
     /// The stable rows that placeholder cells of each image id were
-    /// printed on, so that updating or removing the image reaches them
-    /// wherever they are now, scrollback included.
-    placeholder_rows: HashMap<u32, Range<StableRowIndex>>,
+    /// printed on, per screen, so that updating or removing the image
+    /// reaches them wherever they are now: in scrollback, or on the
+    /// screen that isn't active.
+    placeholder_rows: HashMap<(u32, ScreenKind), Range<StableRowIndex>>,
     used_memory: usize,
 }
 
@@ -400,9 +401,10 @@ impl TerminalState {
 
         if cell.attrs().images().is_some() {
             let row = self.screen().visible_row_to_stable_row(y);
+            let screen = self.screen.active_kind();
             self.kitty_img
                 .placeholder_rows
-                .entry(image_id)
+                .entry((image_id, screen))
                 .and_modify(|rows| {
                     rows.start = rows.start.min(row);
                     rows.end = rows.end.max(row + 1);
@@ -580,24 +582,55 @@ impl TerminalState {
         Ok(())
     }
 
+    /// Apply `f` to each line a placement covers, on the screen it was
+    /// placed on even if that screen isn't active, and mark the lines
+    /// that `f` reports as changed.
+    fn kitty_update_placement_lines(
+        &mut self,
+        info: &PlacementInfo,
+        mut f: impl FnMut(&mut Line) -> bool,
+    ) {
+        let seqno = self.seqno;
+        let screen = self.screen.by_kind_mut(info.screen);
+        let range =
+            screen.stable_range(&(info.first_row..info.first_row + info.rows as StableRowIndex));
+        for idx in range {
+            let line = screen.line_mut(idx);
+            if f(line) {
+                line.update_last_change_seqno(seqno);
+            }
+        }
+    }
+
     fn kitty_remove_placement_from_model(
         &mut self,
         image_id: u32,
         placement_id: Option<u32>,
         info: PlacementInfo,
     ) {
-        let seqno = self.seqno;
-        let screen = self.screen_mut();
-        let range =
-            screen.stable_range(&(info.first_row..info.first_row + info.rows as StableRowIndex));
-        for idx in range {
-            let line = screen.line_mut(idx);
+        self.kitty_update_placement_lines(&info, |line| {
             for c in line.cells_mut() {
                 c.attrs_mut()
                     .detach_image_with_placement(image_id, placement_id);
             }
-            line.update_last_change_seqno(seqno);
-        }
+            true
+        });
+    }
+
+    /// The extent of the rows that placeholders of an image were printed
+    /// on, one per screen they were printed on.
+    fn kitty_placeholder_extents(&self, image_id: u32) -> Vec<PlacementInfo> {
+        self.kitty_img
+            .placeholder_rows
+            .iter()
+            .filter(|((id, _), _)| *id == image_id)
+            .map(|((_, screen), rows)| PlacementInfo {
+                first_row: rows.start,
+                rows: (rows.end - rows.start) as usize,
+                cols: 0,
+                screen: *screen,
+            })
+            .collect()
     }
 
     /// Detach a virtual placement from the rows its placeholders were
@@ -607,15 +640,9 @@ impl TerminalState {
         image_id: u32,
         placement_id: Option<u32>,
     ) {
-        let Some(rows) = self.kitty_img.placeholder_rows.get(&image_id).cloned() else {
-            return;
-        };
-        let info = PlacementInfo {
-            first_row: rows.start,
-            rows: (rows.end - rows.start) as usize,
-            cols: 0,
-        };
-        self.kitty_remove_placement_from_model(image_id, placement_id, info);
+        for info in self.kitty_placeholder_extents(image_id) {
+            self.kitty_remove_placement_from_model(image_id, placement_id, info);
+        }
     }
 
     /// Once an image has no virtual placements left, no placeholder can
@@ -627,7 +654,9 @@ impl TerminalState {
             .keys()
             .any(|(id, _)| *id == image_id)
         {
-            self.kitty_img.placeholder_rows.remove(&image_id);
+            self.kitty_img
+                .placeholder_rows
+                .retain(|(id, _), _| *id != image_id);
         }
     }
 
@@ -635,20 +664,14 @@ impl TerminalState {
     /// were printed. Retransmitting an image under the same id must update
     /// them in place, since the client won't reprint unchanged placeholders.
     fn kitty_replace_virtual_image_data(&mut self, image_id: u32, data: &Arc<ImageData>) {
-        let Some(rows) = self.kitty_img.placeholder_rows.get(&image_id).cloned() else {
-            return;
-        };
-        let seqno = self.seqno;
-        let screen = self.screen_mut();
-        for idx in screen.stable_range(&rows) {
-            let line = screen.line_mut(idx);
-            let mut replaced = false;
-            for c in line.cells_mut() {
-                replaced |= c.attrs_mut().replace_image_data(image_id, data);
-            }
-            if replaced {
-                line.update_last_change_seqno(seqno);
-            }
+        for info in self.kitty_placeholder_extents(image_id) {
+            self.kitty_update_placement_lines(&info, |line| {
+                let mut replaced = false;
+                for c in line.cells_mut() {
+                    replaced |= c.attrs_mut().replace_image_data(image_id, data);
+                }
+                replaced
+            });
         }
     }
 

@@ -340,3 +340,66 @@ fn kitty_unicode_placeholder_in_scrollback_is_detached_on_delete() {
         assert_eq!(cell.attrs().images().is_none(), true);
     }
 }
+
+/// Whether any cell on the primary screen still shows the given image.
+fn primary_screen_shows(term: &TestTerm, image_id: u32) -> bool {
+    term.screen().all_lines().iter().any(|line| {
+        line.visible_cells().any(|cell| {
+            cell.attrs().images().map_or(false, |images| {
+                images.iter().any(|im| im.image_id() == Some(image_id))
+            })
+        })
+    })
+}
+
+/// Updating an image while a fullscreen app holds the alternate screen
+/// must still reach placeholders on the primary screen, or they show the
+/// old image once the app exits.
+#[test]
+fn kitty_unicode_placeholder_on_inactive_screen_follows_retransmitted_image() {
+    let mut term = TestTerm::new(3, 10, 0);
+
+    let seq = format!("\x1b_Ga=t,i=42,t=d,f=100;{}\x1b\\", TINY_PNG_BASE64);
+    term.print(seq.as_bytes());
+    term.print("\x1b_Ga=p,U=1,i=42,c=2,r=1\x1b\\");
+    term.print("\x1b[38;2;0;0;42m");
+    term.print("\u{10eeee}\u{305}\u{305}\u{10eeee}\u{305}\u{30d}");
+    term.print("\x1b[39m");
+    let printed = first_image(&term).hash();
+
+    term.print("\x1b[?1049h");
+    let seq = format!("\x1b_Ga=t,i=42,t=d,f=32,s=2,v=2;{}\x1b\\", TINY_RGBA_BASE64);
+    term.print(seq.as_bytes());
+    term.print("\x1b[?1049l");
+
+    assert_ne!(first_image(&term).hash(), printed);
+}
+
+/// Deleting an image while the alternate screen is active must detach it
+/// from the primary screen as well, for placeholders and for regular
+/// placements alike.
+#[test]
+fn kitty_delete_reaches_inactive_screen() {
+    let mut term = TestTerm::new(3, 10, 0);
+
+    // A regular placement of image 7, and a placeholder of image 42
+    let seq = format!(
+        "\x1b_Ga=T,i=7,c=1,r=1,C=1,t=d,f=100;{}\x1b\\",
+        TINY_PNG_BASE64
+    );
+    term.print(seq.as_bytes());
+    let seq = format!("\x1b_Ga=t,i=42,t=d,f=100;{}\x1b\\", TINY_PNG_BASE64);
+    term.print(seq.as_bytes());
+    term.print("\x1b_Ga=p,U=1,i=42,c=1,r=1\x1b\\");
+    term.print("\r\n\x1b[38;2;0;0;42m\u{10eeee}\u{305}\u{305}\x1b[39m");
+    assert_eq!(primary_screen_shows(&term, 7), true);
+    assert_eq!(primary_screen_shows(&term, 42), true);
+
+    term.print("\x1b[?1049h");
+    term.print("\x1b_Ga=d,d=I,i=7\x1b\\");
+    term.print("\x1b_Ga=d,d=I,i=42\x1b\\");
+    term.print("\x1b[?1049l");
+
+    assert_eq!(primary_screen_shows(&term, 7), false);
+    assert_eq!(primary_screen_shows(&term, 42), false);
+}
