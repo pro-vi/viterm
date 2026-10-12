@@ -30,8 +30,23 @@ Settled, 2026-10-12:
 | 7 | look at each preset | check | here, then the owner | throwaway GUI | 5, 6 | the owner has seen the four looks |
 | 8 | go live | direct | the owner | deploy, merge | 7, bootstrap's session commits `configs/wezterm.lua` | engine installed, presets on bootstrap master |
 
-Start now: 3 and 6. Needs you: 8 (two approvals), and 7's look, since this
-process may not capture the screen.
+Landed, 2026-10-12:
+
+- [x] 1: `/tmp/ui-sketch-tabbar-themes.html`.
+- [x] 2: `d729d8b10`.
+- [x] 3, 4: `unit/fancy-tab-bar-style` at `d3a8d8f28`; gate lenses /overbuild
+  and /perf, five findings, all fixed before the commit.
+- [x] 5: merge `32873c236`, `PATCHES.md` row `6b40302fe`. Verify at contact
+  (U4): the fit measured tabs through `tab_elem`, so the marker moved there.
+- [x] 6: bootstrap `feat/tab-themes` at `1735ea3d` in
+  `~/Development/_worktrees/bootstrap-tab-themes`, not merged; gate lenses
+  /overbuild and /comment, six findings, all fixed before the commit.
+- [ ] 7: four throwaway GUIs from `build` (debug) are open for the owner,
+  one per look, with the live session's 50 titles.
+- [ ] 8: waits on 7 and on bootstrap's other session committing its
+  `configs/wezterm.lua` edits.
+
+Needs you: 7's look, and 8's two approvals.
 
 Fog: none past 7; whether 5's conflicts need the fit measurement changed is a
 verify-at-contact item in the plan (U4).
