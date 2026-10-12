@@ -114,7 +114,9 @@ impl crate::TermWindow {
     ) -> anyhow::Result<f32> {
         if config.use_fancy_tab_bar {
             let font = fontconfig.title_font()?;
-            let row = (font.metrics().cell_height.get() as f32 * 1.75).ceil();
+            let row = (font.metrics().cell_height.get() as f32
+                * config.fancy_tab_bar_style.row_height)
+                .ceil();
             Ok(row * config.tab_bar_rows.max(1) as f32)
         } else {
             // The retro tab bar draws a single terminal line, so it has no

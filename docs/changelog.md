@@ -83,6 +83,8 @@ As features stabilize some brief notes about them will accumulate here.
 * [key_assignment_log](config/lua/config/key_assignment_log.md) option to
   append one JSON line per key assignment a key performs, marking the
   automatic repeats of a held key.
+* [fancy_tab_bar_style](config/lua/config/fancy_tab_bar_style.md) sets the
+  shape, spacing and active-tab marker of the fancy tab bar's tabs.
 * [command_palette_line_height](config/lua/config/command_palette_line_height.md)
   option to scale the vertical spacing of rows in the command palette,
   independently of [line_height](config/lua/config/line_height.md) which is for terminal cells only.

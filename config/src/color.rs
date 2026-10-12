@@ -571,6 +571,105 @@ fn default_window_close() -> String {
     " X ".to_string()
 }
 
+/// The outline of a tab in the fancy tab bar.
+#[derive(Debug, FromDynamic, ToDynamic, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TabShape {
+    /// Square on the edge next to the terminal, rounded on the far edge.
+    #[default]
+    Rounded,
+    Square,
+    /// Both ends fully rounded.
+    Pill,
+    /// A parallelogram leaning right.
+    Slant,
+}
+
+/// Where a tab sits within its row of the fancy tab bar.
+#[derive(Debug, FromDynamic, ToDynamic, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TabVerticalAlign {
+    /// Against the edge next to the terminal, with a small gap on the far edge.
+    #[default]
+    TerminalEdge,
+    Middle,
+}
+
+/// How the fancy tab bar marks the active tab, beyond its colors.
+#[derive(Debug, FromDynamic, ToDynamic, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TabMarker {
+    /// Only the `active_tab` colors.
+    #[default]
+    Fill,
+    TopLine,
+    BottomLine,
+    Ring,
+}
+
+#[derive(Debug, Clone, PartialEq, FromDynamic, ToDynamic)]
+pub struct FancyTabBarStyle {
+    #[dynamic(default)]
+    pub tab_shape: TabShape,
+    /// The corner radius of `Rounded` and the horizontal run of `Slant`.
+    #[dynamic(try_from = "crate::units::PixelUnit", default = "default_half_cell")]
+    pub tab_corner_size: Dimension,
+    /// The height of a row of the tab bar, as a multiple of the cell
+    /// height of the tab bar font.
+    #[dynamic(default = "default_tab_bar_row_height")]
+    pub row_height: f32,
+    #[dynamic(try_from = "crate::units::PixelUnit", default = "default_half_cell")]
+    pub tab_padding_x: Dimension,
+    #[dynamic(try_from = "crate::units::PixelUnit", default = "default_quarter_cell")]
+    pub tab_padding_y: Dimension,
+    /// The space between two tabs; negative values overlap them.
+    #[dynamic(try_from = "crate::units::PixelUnit", default)]
+    pub tab_gap: Dimension,
+    #[dynamic(default)]
+    pub tab_vertical_align: TabVerticalAlign,
+    #[dynamic(default)]
+    pub active_tab_marker: TabMarker,
+    /// Defaults to the `fg_color` of `active_tab`.
+    #[dynamic(default)]
+    pub active_tab_marker_color: Option<RgbaColor>,
+    #[dynamic(
+        try_from = "crate::units::PixelUnit",
+        default = "default_active_tab_marker_width"
+    )]
+    pub active_tab_marker_width: Dimension,
+    /// Whether a background color set by `format-tab-title` replaces the
+    /// `active_tab` background of the active tab.
+    #[dynamic(default = "default_true")]
+    pub active_tab_title_background: bool,
+}
+
+impl Default for FancyTabBarStyle {
+    fn default() -> Self {
+        Self {
+            tab_shape: TabShape::default(),
+            tab_corner_size: default_half_cell(),
+            row_height: default_tab_bar_row_height(),
+            tab_padding_x: default_half_cell(),
+            tab_padding_y: default_quarter_cell(),
+            tab_gap: Dimension::default(),
+            tab_vertical_align: TabVerticalAlign::default(),
+            active_tab_marker: TabMarker::default(),
+            active_tab_marker_color: None,
+            active_tab_marker_width: default_active_tab_marker_width(),
+            active_tab_title_background: true,
+        }
+    }
+}
+
+const fn default_quarter_cell() -> Dimension {
+    Dimension::Cells(0.25)
+}
+
+const fn default_active_tab_marker_width() -> Dimension {
+    Dimension::Pixels(2.)
+}
+
+fn default_tab_bar_row_height() -> f32 {
+    1.75
+}
+
 #[derive(Debug, Clone, FromDynamic, ToDynamic)]
 pub struct WindowFrameConfig {
     #[dynamic(default = "default_inactive_titlebar_bg")]
@@ -808,5 +907,33 @@ brights = [ "#8ca6a6" ,"#e5164a" ,"#00b368" ,"#b3694d" ,"#0094f0" ,"#ff5792" ,"#
     assert_eq!(
         scheme.colors.indexed.get(&52),
         Some(&RgbColor::new_8bpc(0xfb, 0xda, 0xda).into())
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn test_fancy_tab_bar_style() {
+    let parse = |toml_text: &str| {
+        let value: toml::Value = toml::from_str(toml_text).unwrap();
+        FancyTabBarStyle::from_dynamic(&crate::toml_to_dynamic(&value), Default::default()).unwrap()
+    };
+
+    assert_eq!(parse(""), FancyTabBarStyle::default());
+
+    let style = parse(
+        r#"
+tab_shape = "Pill"
+tab_gap = "-3px"
+active_tab_marker = "Ring"
+"#,
+    );
+    assert_eq!(
+        style,
+        FancyTabBarStyle {
+            tab_shape: TabShape::Pill,
+            tab_gap: Dimension::Pixels(-3.),
+            active_tab_marker: TabMarker::Ring,
+            ..Default::default()
+        }
     );
 }
