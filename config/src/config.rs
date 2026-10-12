@@ -1,7 +1,8 @@
 use crate::background::{BackgroundLayer, Gradient};
 use crate::bell::{AudibleBell, EasingFunction, VisualBell};
 use crate::color::{
-    ColorSchemeFile, HsbTransform, Palette, SrgbaTuple, TabBarStyle, WindowFrameConfig,
+    ColorSchemeFile, FancyTabBarStyle, HsbTransform, Palette, SrgbaTuple, TabBarStyle,
+    WindowFrameConfig,
 };
 use crate::daemon::DaemonOptions;
 use crate::exec_domain::ExecDomain;
@@ -190,6 +191,9 @@ pub struct Config {
 
     #[dynamic(default)]
     pub tab_bar_style: TabBarStyle,
+
+    #[dynamic(default)]
+    pub fancy_tab_bar_style: FancyTabBarStyle,
 
     #[dynamic(default)]
     pub resolved_palette: Palette,
@@ -1942,7 +1946,7 @@ const fn default_one_cell() -> Dimension {
     Dimension::Cells(1.)
 }
 
-const fn default_half_cell() -> Dimension {
+pub(crate) const fn default_half_cell() -> Dimension {
     Dimension::Cells(0.5)
 }
 
