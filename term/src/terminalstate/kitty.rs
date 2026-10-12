@@ -7,6 +7,7 @@ use ::image::{
 use anyhow::Context;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
+use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
 use wezterm_cell::color::ColorAttribute;
@@ -99,6 +100,10 @@ pub struct KittyImageState {
     id_to_data: HashMap<u32, Arc<ImageData>>,
     placements: HashMap<(u32, Option<u32>), PlacementInfo>,
     virtual_placements: HashMap<(u32, Option<u32>), KittyVirtualPlacement>,
+    /// The stable rows that placeholder cells of each image id were
+    /// printed on, so that updating or removing the image reaches them
+    /// wherever they are now, scrollback included.
+    placeholder_rows: HashMap<u32, Range<StableRowIndex>>,
     used_memory: usize,
 }
 
@@ -393,6 +398,18 @@ impl TerminalState {
                 )));
         }
 
+        if cell.attrs().images().is_some() {
+            let row = self.screen().visible_row_to_stable_row(y);
+            self.kitty_img
+                .placeholder_rows
+                .entry(image_id)
+                .and_modify(|rows| {
+                    rows.start = rows.start.min(row);
+                    rows.end = rows.end.max(row + 1);
+                })
+                .or_insert(row..row + 1);
+        }
+
         self.screen_mut().set_cell(x, y, &cell, seqno);
         true
     }
@@ -583,41 +600,47 @@ impl TerminalState {
         }
     }
 
-    /// Placeholder cells referencing a virtual placement can be anywhere
-    /// in the visible screen, so detach across all of it rather than a
-    /// recorded placement range.
+    /// Detach a virtual placement from the rows its placeholders were
+    /// printed on, wherever those rows are now.
     fn kitty_remove_virtual_placement_from_model(
         &mut self,
         image_id: u32,
         placement_id: Option<u32>,
     ) {
+        let Some(rows) = self.kitty_img.placeholder_rows.get(&image_id).cloned() else {
+            return;
+        };
         let info = PlacementInfo {
-            first_row: self.screen().visible_row_to_stable_row(0),
-            rows: self.screen().physical_rows,
+            first_row: rows.start,
+            rows: (rows.end - rows.start) as usize,
             cols: 0,
         };
         self.kitty_remove_placement_from_model(image_id, placement_id, info);
+    }
+
+    /// Once an image has no virtual placements left, no placeholder can
+    /// resolve to it anymore and its rows no longer need tracking.
+    fn kitty_forget_unused_placeholder_rows(&mut self, image_id: u32) {
+        if !self
+            .kitty_img
+            .virtual_placements
+            .keys()
+            .any(|(id, _)| *id == image_id)
+        {
+            self.kitty_img.placeholder_rows.remove(&image_id);
+        }
     }
 
     /// Placeholder cells hold the image data that was current when they
     /// were printed. Retransmitting an image under the same id must update
     /// them in place, since the client won't reprint unchanged placeholders.
     fn kitty_replace_virtual_image_data(&mut self, image_id: u32, data: &Arc<ImageData>) {
-        if image_id == 0
-            || !self
-                .kitty_img
-                .virtual_placements
-                .keys()
-                .any(|(id, _)| *id == image_id)
-        {
+        let Some(rows) = self.kitty_img.placeholder_rows.get(&image_id).cloned() else {
             return;
-        }
+        };
         let seqno = self.seqno;
         let screen = self.screen_mut();
-        let first_row = screen.visible_row_to_stable_row(0);
-        let range =
-            screen.stable_range(&(first_row..first_row + screen.physical_rows as StableRowIndex));
-        for idx in range {
+        for idx in screen.stable_range(&rows) {
             let line = screen.line_mut(idx);
             let mut replaced = false;
             for c in line.cells_mut() {
@@ -667,6 +690,7 @@ impl TerminalState {
                 self.kitty_remove_virtual_placement_from_model(image_id, p);
             }
         }
+        self.kitty_forget_unused_placeholder_rows(image_id);
 
         log::trace!(
             "after remove: there are {} placements, {} images, {} memory",
@@ -684,6 +708,7 @@ impl TerminalState {
         {
             self.kitty_remove_virtual_placement_from_model(image_id, p);
         }
+        self.kitty_img.placeholder_rows.clear();
         if delete {
             self.kitty_img.id_to_data.clear();
             self.kitty_img.used_memory = 0;

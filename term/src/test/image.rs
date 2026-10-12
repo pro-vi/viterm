@@ -276,3 +276,67 @@ fn kitty_unicode_placeholder_follows_retransmitted_image() {
     // The line must be marked changed, or the gui never repaints it
     assert_ne!(lines[0].current_seqno(), seqno_before);
 }
+
+/// Prints a 2x1 placeholder grid for image 42 on the first row, then
+/// pushes it into scrollback with ordinary output.
+fn placeholders_scrolled_into_scrollback() -> TestTerm {
+    let mut term = TestTerm::new(3, 10, 10);
+
+    let seq = format!("\x1b_Ga=t,i=42,t=d,f=100;{}\x1b\\", TINY_PNG_BASE64);
+    term.print(seq.as_bytes());
+    term.print("\x1b_Ga=p,U=1,i=42,c=2,r=1\x1b\\");
+    term.print("\x1b[38;2;0;0;42m");
+    term.print("\u{10eeee}\u{305}\u{305}\u{10eeee}\u{305}\u{30d}");
+    term.print("\x1b[39m\r\n\n\n\n");
+
+    let first_line = &term.screen().all_lines()[0];
+    assert_eq!(term.screen().scrollback_rows() > 3, true);
+    assert_eq!(
+        first_line
+            .visible_cells()
+            .next()
+            .unwrap()
+            .attrs()
+            .images()
+            .is_some(),
+        true
+    );
+    term
+}
+
+/// Updating an image must reach placeholders that have since scrolled
+/// out of view, as kitty resolves them by id however far back they are.
+#[test]
+fn kitty_unicode_placeholder_in_scrollback_follows_retransmitted_image() {
+    let mut term = placeholders_scrolled_into_scrollback();
+    let printed = term.screen().all_lines()[0]
+        .visible_cells()
+        .next()
+        .and_then(|cell| cell.attrs().images())
+        .expect("image tile attached")[0]
+        .image_data()
+        .hash();
+
+    let seq = format!("\x1b_Ga=t,i=42,t=d,f=32,s=2,v=2;{}\x1b\\", TINY_RGBA_BASE64);
+    term.print(seq.as_bytes());
+
+    let lines = term.screen().all_lines();
+    for cell in lines[0].visible_cells().take(2) {
+        let images = cell.attrs().images().expect("image tile attached");
+        assert_ne!(images[0].image_data().hash(), printed);
+    }
+}
+
+/// Deleting an image must detach it from placeholders in scrollback too,
+/// or scrolling back shows an image the client has deleted.
+#[test]
+fn kitty_unicode_placeholder_in_scrollback_is_detached_on_delete() {
+    let mut term = placeholders_scrolled_into_scrollback();
+
+    term.print("\x1b_Ga=d,d=I,i=42\x1b\\");
+
+    let lines = term.screen().all_lines();
+    for cell in lines[0].visible_cells().take(2) {
+        assert_eq!(cell.attrs().images().is_none(), true);
+    }
+}
