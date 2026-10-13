@@ -8,8 +8,9 @@ use crate::termwindow::{UIItem, UIItemType};
 use crate::utilsprites::RenderMetrics;
 use config::{
     Dimension, DimensionContext, FancyTabBarStyle, TabBarColors, TabMarker, TabShape,
-    TabVerticalAlign,
+    TabVerticalAlign, TitleBackgroundPaint,
 };
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
@@ -24,6 +25,34 @@ use window::{IntegratedTitleButtonAlignment, IntegratedTitleButtonStyle};
 /// Every tab has a border this wide, painted like its background except
 /// for the edge of an inactive tab.
 const TAB_BORDER: f32 = 1.;
+
+/// The title as its tab draws it. Each run of a title paints its own
+/// background, so a background the tab must not show is cleared from the
+/// cells themselves: moved to their text for `Text`, dropped where `shown`
+/// is false.
+fn paint_title(title: &Line, paint: TitleBackgroundPaint, shown: bool) -> Cow<'_, Line> {
+    let has_background = || {
+        title
+            .visible_cells()
+            .any(|cell| cell.attrs().background() != ColorAttribute::Default)
+    };
+    if (shown && paint == TitleBackgroundPaint::Fill) || !has_background() {
+        return Cow::Borrowed(title);
+    }
+    let mut title = title.clone();
+    for cell in title.cells_mut_for_attr_changes_only() {
+        let background = cell.attrs().background();
+        if background == ColorAttribute::Default {
+            continue;
+        }
+        let attrs = cell.attrs_mut();
+        if shown {
+            attrs.set_foreground(background);
+        }
+        attrs.set_background(ColorAttribute::Default);
+    }
+    Cow::Owned(title)
+}
 
 fn pixel_box(p: PixelDimension) -> BoxDimension {
     BoxDimension {
@@ -452,17 +481,23 @@ impl crate::TermWindow {
             .to_linear();
 
         let item_to_elem = |item: &TabEntry| -> Element {
-            let element = Element::with_line(&font, &item.title, palette);
+            let title = match item.item {
+                TabBarItem::Tab { active, .. } => paint_title(
+                    &item.title,
+                    style.title_background_paints,
+                    !active || style.active_tab_title_background,
+                ),
+                _ => Cow::Borrowed(&item.title),
+            };
+            let element = Element::with_line(&font, &title, palette);
 
-            let bg_color = item
-                .title
+            let bg_color = title
                 .get_cell(0)
                 .and_then(|c| match c.attrs().background() {
                     ColorAttribute::Default => None,
                     col => Some(palette.resolve_bg(col)),
                 });
-            let fg_color = item
-                .title
+            let fg_color = title
                 .get_cell(0)
                 .and_then(|c| match c.attrs().foreground() {
                     ColorAttribute::Default => None,
@@ -530,13 +565,9 @@ impl crate::TermWindow {
                     text: new_tab_hover.fg_color.to_linear().into(),
                 })),
                 TabBarItem::Tab { active, .. } if active => {
-                    let bg = if style.active_tab_title_background {
-                        bg_color
-                    } else {
-                        None
-                    }
-                    .unwrap_or_else(|| active_tab.bg_color.into())
-                    .to_linear();
+                    let bg = bg_color
+                        .unwrap_or_else(|| active_tab.bg_color.into())
+                        .to_linear();
                     element
                         .vertical_align(look.vertical_align())
                         .item_type(UIItemType::TabBar(item.item.clone()))
@@ -1380,5 +1411,46 @@ mod test {
         );
         assert_eq!(look.vertical_align(), VerticalAlign::Middle);
         assert_eq!(pixels(look.margin()), sides(0., -3., 0., 0.));
+    }
+
+    #[test]
+    fn a_title_background_paints_where_the_style_says() {
+        let tint = ColorAttribute::TrueColorWithDefaultFallback(termwiz::color::SrgbaTuple(
+            0.1, 0.2, 0.3, 1.0,
+        ));
+        let mut attrs = termwiz::cell::CellAttributes::default();
+        attrs.set_background(tint);
+        let title = Line::from_text(" 1: x ", &attrs, termwiz::surface::SEQ_ZERO, None);
+        let colors = |line: &Line| {
+            let cell = line.get_cell(1).unwrap();
+            (cell.attrs().foreground(), cell.attrs().background())
+        };
+
+        let fill = paint_title(&title, TitleBackgroundPaint::Fill, true);
+        assert!(matches!(fill, Cow::Borrowed(_)));
+        assert_eq!(colors(&fill), (ColorAttribute::Default, tint));
+
+        let text = paint_title(&title, TitleBackgroundPaint::Text, true);
+        assert_eq!(colors(&text), (tint, ColorAttribute::Default));
+
+        for paint in [TitleBackgroundPaint::Fill, TitleBackgroundPaint::Text] {
+            let hidden = paint_title(&title, paint, false);
+            assert_eq!(
+                colors(&hidden),
+                (ColorAttribute::Default, ColorAttribute::Default),
+                "{paint:?}"
+            );
+        }
+
+        let plain = Line::from_text(
+            " 2: y ",
+            &termwiz::cell::CellAttributes::default(),
+            termwiz::surface::SEQ_ZERO,
+            None,
+        );
+        assert!(matches!(
+            paint_title(&plain, TitleBackgroundPaint::Text, true),
+            Cow::Borrowed(_)
+        ));
     }
 }

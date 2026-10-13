@@ -604,6 +604,17 @@ pub enum TabMarker {
     Ring,
 }
 
+/// Where the fancy tab bar paints a background color that
+/// `format-tab-title` sets on a tab's title.
+#[derive(Debug, FromDynamic, ToDynamic, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TitleBackgroundPaint {
+    /// The tab's background.
+    #[default]
+    Fill,
+    /// The title's text, on the tab's own background.
+    Text,
+}
+
 #[derive(Debug, Clone, PartialEq, FromDynamic, ToDynamic)]
 pub struct FancyTabBarStyle {
     #[dynamic(default)]
@@ -634,8 +645,11 @@ pub struct FancyTabBarStyle {
         default = "default_active_tab_marker_width"
     )]
     pub active_tab_marker_width: Dimension,
-    /// Whether a background color set by `format-tab-title` replaces the
-    /// `active_tab` background of the active tab.
+    #[dynamic(default)]
+    pub title_background_paints: TitleBackgroundPaint,
+    /// Whether a background color set by `format-tab-title` paints on the
+    /// active tab at all; without it the active tab keeps its `active_tab`
+    /// colors.
     #[dynamic(default = "default_true")]
     pub active_tab_title_background: bool,
 }
@@ -653,6 +667,7 @@ impl Default for FancyTabBarStyle {
             active_tab_marker: TabMarker::default(),
             active_tab_marker_color: None,
             active_tab_marker_width: default_active_tab_marker_width(),
+            title_background_paints: TitleBackgroundPaint::default(),
             active_tab_title_background: true,
         }
     }
@@ -925,6 +940,7 @@ fn test_fancy_tab_bar_style() {
 tab_shape = "Pill"
 tab_gap = "-3px"
 active_tab_marker = "Ring"
+title_background_paints = "Text"
 "#,
     );
     assert_eq!(
@@ -933,6 +949,7 @@ active_tab_marker = "Ring"
             tab_shape: TabShape::Pill,
             tab_gap: Dimension::Pixels(-3.),
             active_tab_marker: TabMarker::Ring,
+            title_background_paints: TitleBackgroundPaint::Text,
             ..Default::default()
         }
     );
