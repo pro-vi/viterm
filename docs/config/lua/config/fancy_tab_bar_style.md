@@ -33,6 +33,7 @@ config.fancy_tab_bar_style = {
 | `active_tab_marker` | `"Fill"`, `"TopLine"`, `"BottomLine"`, `"Ring"` | `"Fill"` |
 | `active_tab_marker_color` | color | the `active_tab` foreground |
 | `active_tab_marker_width` | dimension | `"2px"` |
+| `title_background_paints` | `"Fill"`, `"Text"` | `"Fill"` |
 | `active_tab_title_background` | boolean | `true` |
 
 A dimension is a number of pixels or a string with a unit: `"2px"`, `"1pt"`,
@@ -57,10 +58,14 @@ font.
   `TopLine` and `BottomLine` draw a line across that edge of the active tab,
   and `Ring` draws a ring around it, following its shape. The marked tab stays
   the size of the others; the line or ring takes the space from its padding.
-* `active_tab_title_background`: a
+* `title_background_paints`: a
   [format-tab-title](../window-events/format-tab-title.md) handler can set a
-  tab's background. With `false`, the active tab keeps its `active_tab`
-  background even when the handler sets one.
+  background color on a tab's title. `Fill` paints the tab with it. `Text`
+  colors the title's text with it instead and leaves the tab its own
+  background, which keeps tabs that sit side by side, or one row above
+  another, from running together into one block of color.
+* `active_tab_title_background`: with `false`, the active tab ignores that
+  color and keeps its `active_tab` colors, whichever way it would paint.
 
 Because it is one table, a key can switch between looks with
 [window:set_config_overrides](../window/set_config_overrides.md); the fields
