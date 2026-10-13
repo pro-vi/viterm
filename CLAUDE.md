@@ -160,10 +160,17 @@ when it does not, so renaming the engine rolls the machine back to a stock
 build.
 
 Anything a unit adds that the config must ask for — a new config option, a new
-Lua method — is passed by those launchers as `--config name=value`, never
-written into `configs/wezterm.lua`. The mux server reads that same config file,
-and an option its own binary does not know makes it fall back to a default
-config and bind the default socket instead of `human-main.sock`.
+Lua method — is passed by those launchers as `--config name=value`, or written
+into `configs/wezterm.lua` only after a strict `config_builder` of the running
+binary has taken that exact value (`engine_accepts` there). Never set it there
+unguarded. The mux server reads that same config file with its own binary, and
+`config_builder` is strict by default (`config/src/lua.rs`): an option, or a
+field inside one, that the binary does not know fails the whole config, which
+falls back to the defaults without a log line and binds the default socket
+instead of `human-main.sock`. Checked 2026-10-12: setting an unknown
+`fancy_tab_bar_style`, or a known one with an unknown field, dropped a test
+config's own key binding, while the probe-guarded write loaded the config on
+stock WezTerm, an engine without the field, and one with it.
 
 ## Trying a change without disturbing the running session
 
