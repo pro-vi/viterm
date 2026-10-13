@@ -46,6 +46,18 @@ Landed, 2026-10-12:
 - [ ] 8: waits on 7 and on bootstrap's other session committing its
   `configs/wezterm.lua` edits.
 
+Round 2, tints, 2026-10-12. The owner on the mocked paint areas: "the line
+solution is really bad when there are multi rows", and "two options of tint:
+the fill, because I prefer the darker color here, and the text".
+
+- [x] `title_background_paints` (Fill, Text) and the active-tab fix: unit
+  `3ac2ba13a`, merge `b5662e493`, ledger `27c67a376`; gate /perf (0.31 ms per
+  rebuild at most, one fix taken) and /overbuild (one optional finding,
+  declined for the fit path's repeated calls).
+- [x] Bootstrap `c408f439`: a choice is a look and a tint, ten in all, picked
+  with Alt+Shift+L; gate /overbuild and /comment, nine findings, all fixed.
+- [ ] 7 again: eight throwaway GUIs open, each look with each tint.
+
 Needs you: 7's look, and 8's two approvals.
 
 Fog: none past 7; whether 5's conflicts need the fit measurement changed is a
