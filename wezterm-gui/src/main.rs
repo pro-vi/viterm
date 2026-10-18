@@ -849,6 +849,14 @@ fn maybe_show_configuration_error_window() {
 }
 
 fn run_show_keys(config: config::ConfigHandle, cmd: &ShowKeysCommand) -> anyhow::Result<()> {
+    // If the config failed to load, `config` is the built-in default, and
+    // printing its assignments would pass them off as the user's own.  Exit
+    // here rather than returning the error, which would also raise a GUI toast.
+    if let Err(err) = config::configuration_result() {
+        log::error!("{}", err);
+        std::process::exit(1);
+    }
+
     let map = crate::inputmap::InputMap::new(&config);
     if cmd.lua {
         map.dump_config(cmd.key_table.as_deref());

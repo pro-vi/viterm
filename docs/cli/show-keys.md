@@ -7,6 +7,12 @@ Prints the complete set of key assignments based on your config file.
 
 The command shows each key table as well as the set of mouse bindings.
 
+{{since('nightly')}}
+
+If your config file fails to load, the command prints the error and exits
+with a non-zero status. Use `wezterm -n show-keys` to see the default
+assignments.
+
 A truncated example of the output is shown below.
 
 
