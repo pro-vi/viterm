@@ -160,6 +160,13 @@ As features stabilize some brief notes about them will accumulate here.
   `CTRL-u` to kill back to the start of the line. Thanks to @bew! #8013
 
 #### Fixed
+* Multiplexer: moving a tab with [`MoveTab`](./config/lua/keyassignment/MoveTab.md)
+  or [`MoveTabRelative`](./config/lua/keyassignment/MoveTabRelative.md) in a
+  `wezterm connect` client changed the order in that client only; it was lost
+  on reattach, and other clients of the same server did not see it. The move
+  is now sent to the server, and clients of this version show the server's
+  order. A server that predates this keeps its order, and the move stays
+  local as before. #5339
 * Multiplexer: a `wezterm connect` client kept showing a tab that the server
   had removed, for example after `wezterm cli split-pane --move-pane-id` moved
   the tab's only pane into another tab; the moved pane then appeared in both

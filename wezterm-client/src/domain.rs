@@ -32,6 +32,9 @@ pub struct ClientInner {
     remote_to_local_window: Mutex<HashMap<WindowId, WindowId>>,
     remote_to_local_tab: Mutex<HashMap<TabId, TabId>>,
     remote_to_local_pane: Mutex<HashMap<PaneId, PaneId>>,
+    /// The order of each remote window's tabs in the last pane list, so that
+    /// a resync can tell when the server has put them in a new order.
+    remote_tab_order: Mutex<HashMap<WindowId, Vec<TabId>>>,
     pub focused_remote_pane_id: Mutex<Option<PaneId>>,
 }
 
@@ -114,6 +117,19 @@ impl ClientInner {
             }
         }
         None
+    }
+
+    /// The order of a local window's tabs, in remote ids, to send to the
+    /// server; None when the window is not the copy of a remote window.
+    fn tab_order_request(&self, local_window_id: WindowId) -> Option<codec::SetWindowTabOrder> {
+        let window_id = self.local_to_remote_window(local_window_id)?;
+        let mux = Mux::get();
+        let window = mux.get_window(local_window_id)?;
+        let tab_ids = window
+            .iter_tabs()
+            .filter_map(|tab| self.local_to_remote_tab(tab.tab_id()))
+            .collect();
+        Some(codec::SetWindowTabOrder { window_id, tab_ids })
     }
 
     fn local_to_remote_window(&self, local_window_id: WindowId) -> Option<WindowId> {
@@ -284,6 +300,7 @@ impl ClientInner {
             remote_to_local_window: Mutex::new(HashMap::new()),
             remote_to_local_tab: Mutex::new(HashMap::new()),
             remote_to_local_pane: Mutex::new(HashMap::new()),
+            remote_tab_order: Mutex::new(HashMap::new()),
             focused_remote_pane_id: Mutex::new(None),
         }
     }
@@ -429,9 +446,33 @@ fn mux_notify_client_domain(local_domain_id: DomainId, notif: MuxNotification) -
                 }
             }
         }
+        MuxNotification::WindowTabOrderChanged(window_id) => {
+            if let Some(inner) = client_domain.inner() {
+                // Defer: Mux::get_window may hit a borrow error if called
+                // now, as for WindowWorkspaceChanged above
+                promise::spawn::spawn_into_main_thread(async move {
+                    if let Some(request) = inner.tab_order_request(window_id) {
+                        // A server that predates the request refuses it and
+                        // keeps its order; the local order stands.
+                        if let Err(err) = inner.client.set_window_tab_order(request).await {
+                            log::debug!("set_window_tab_order: {err:#}");
+                        }
+                    }
+                })
+                .detach();
+            }
+        }
         _ => {}
     }
     true
+}
+
+/// Whether the tabs that are in both lists come in another order in `now`
+/// than in `before`; tabs added or removed in between do not count.
+fn reordered(before: &[TabId], now: &[TabId]) -> bool {
+    let kept_before = before.iter().filter(|id| now.contains(id));
+    let kept_now = now.iter().filter(|id| before.contains(id));
+    !kept_before.eq(kept_now)
 }
 
 impl ClientDomain {
@@ -565,6 +606,7 @@ impl ClientDomain {
             tabs: mut remote_tabs_to_forget,
             panes: mut remote_panes_to_forget,
         } = known;
+        let mut tab_order: HashMap<WindowId, Vec<TabId>> = HashMap::new();
 
         for (tabroot, tab_title) in panes.tabs.into_iter().zip(panes.tab_titles.iter()) {
             let root_size = match tabroot.root_size() {
@@ -577,6 +619,10 @@ impl ClientDomain {
 
                 remote_windows_to_forget.remove(&remote_window_id);
                 remote_tabs_to_forget.remove(&remote_tab_id);
+                tab_order
+                    .entry(remote_window_id)
+                    .or_default()
+                    .push(remote_tab_id);
 
                 if let Some(tab_id) = inner.remote_to_local_tab_id(remote_tab_id) {
                     match mux.get_tab(tab_id) {
@@ -695,6 +741,37 @@ impl ClientDomain {
                 let local_window_id = mux.new_empty_window(workspace.take(), position);
                 inner.record_remote_to_local_window_mapping(remote_window_id, *local_window_id);
                 mux.add_tab_to_window(&tab, *local_window_id)?;
+            }
+        }
+
+        // The server's order changes only when it took a tab move from some
+        // client, and then each client shows it. A move that this client
+        // made and the server could not take leaves the server's order as it
+        // was, and so is not undone here.
+        let reorders: Vec<(WindowId, Vec<TabId>)> = {
+            let mut recorded = inner.remote_tab_order.lock().unwrap();
+            let reorders = tab_order
+                .iter()
+                .filter(|(window_id, order)| {
+                    recorded
+                        .get(window_id)
+                        .map_or(false, |before| reordered(before, order))
+                })
+                .map(|(window_id, order)| (*window_id, order.clone()))
+                .collect();
+            *recorded = tab_order;
+            reorders
+        };
+        // Applied without WindowTabOrderChanged, which would send it back
+        for (remote_window_id, order) in reorders {
+            if let Some(local_window_id) = inner.remote_to_local_window(remote_window_id) {
+                let local: Vec<TabId> = order
+                    .iter()
+                    .filter_map(|remote_tab_id| inner.remote_to_local_tab_id(*remote_tab_id))
+                    .collect();
+                if let Some(mut window) = mux.get_window_mut(local_window_id) {
+                    window.set_tab_order(&local);
+                }
             }
         }
 
@@ -1139,10 +1216,13 @@ mod test {
             self.inner.remote_to_local_tab_id(remote_tab_id).unwrap()
         }
 
+        fn local_window(&self) -> WindowId {
+            self.inner.remote_to_local_window(WINDOW).unwrap()
+        }
+
         /// The local tabs of the local window, each as its local pane ids.
         fn window_tabs(&self) -> Vec<Vec<PaneId>> {
-            let window_id = self.inner.remote_to_local_window(WINDOW).unwrap();
-            let window = self.mux.get_window(window_id).unwrap();
+            let window = self.mux.get_window(self.local_window()).unwrap();
             window
                 .iter_tabs()
                 .map(|tab| {
@@ -1152,6 +1232,23 @@ mod test {
                         .collect()
                 })
                 .collect()
+        }
+
+        /// The local tabs of the local window, in order.
+        fn window_tab_ids(&self) -> Vec<TabId> {
+            let window = self.mux.get_window(self.local_window()).unwrap();
+            window.iter_tabs().map(|tab| tab.tab_id()).collect()
+        }
+
+        /// Reorder the local window's tabs, which moving a tab in the GUI
+        /// also does.
+        fn move_tabs_locally(&self, order: &[TabId]) {
+            let window_id = self.local_window();
+            assert!(self
+                .mux
+                .get_window_mut(window_id)
+                .unwrap()
+                .set_tab_order(order));
         }
 
         /// The remote panes the client asked the server to kill. Each round
@@ -1291,5 +1388,51 @@ mod test {
         assert_eq!(f.window_tabs(), vec![vec![p10], vec![p20]]);
         assert_eq!(f.inner.remote_to_local_tab_id(2), Some(t2));
         assert_eq!(f.kills_sent(), Vec::<PaneId>::new());
+    }
+
+    /// A tab moved in the GUI is sent to the server as the window's new
+    /// order, in the server's ids.
+    #[test]
+    fn a_local_move_makes_a_tab_order_request() {
+        let f = Fixture::new();
+        f.resync(pane_list(&[(1, &[10]), (2, &[20]), (3, &[30])]));
+        let (t1, t2, t3) = (f.local_tab(1), f.local_tab(2), f.local_tab(3));
+        f.move_tabs_locally(&[t3, t1, t2]);
+
+        assert_eq!(
+            f.inner.tab_order_request(f.local_window()),
+            Some(codec::SetWindowTabOrder {
+                window_id: WINDOW,
+                tab_ids: vec![3, 1, 2],
+            })
+        );
+    }
+
+    /// The server put the tabs in a new order, taken from some client: the
+    /// next resync shows that order.
+    #[test]
+    fn a_new_server_order_is_shown() {
+        let f = Fixture::new();
+        f.resync(pane_list(&[(1, &[10]), (2, &[20]), (3, &[30])]));
+        let (t1, t2, t3) = (f.local_tab(1), f.local_tab(2), f.local_tab(3));
+
+        f.resync(pane_list(&[(3, &[30]), (1, &[10]), (2, &[20])]));
+
+        assert_eq!(f.window_tab_ids(), vec![t3, t1, t2]);
+    }
+
+    /// A server that cannot take a tab move keeps its own order. A resync
+    /// must not undo the move made in this client, also when the server
+    /// added a tab since.
+    #[test]
+    fn a_local_move_survives_a_server_that_kept_its_order() {
+        let f = Fixture::new();
+        f.resync(pane_list(&[(1, &[10]), (2, &[20]), (3, &[30])]));
+        let (t1, t2, t3) = (f.local_tab(1), f.local_tab(2), f.local_tab(3));
+        f.move_tabs_locally(&[t3, t1, t2]);
+
+        f.resync(pane_list(&[(1, &[10]), (2, &[20]), (3, &[30]), (4, &[40])]));
+
+        assert_eq!(f.window_tab_ids(), vec![t3, t1, t2, f.local_tab(4)]);
     }
 }
