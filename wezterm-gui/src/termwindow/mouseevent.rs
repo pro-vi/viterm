@@ -1,4 +1,5 @@
 use crate::tabbar::TabBarItem;
+use crate::termwindow::tabgrouppopup::{press_on_popup, PressOnPopup};
 use crate::termwindow::{
     GuiWin, MouseCapture, PositionedSplit, ScrollHit, TermWindowNotif, UIItem, UIItemType, TMB,
 };
@@ -127,6 +128,12 @@ impl super::TermWindow {
             WMEK::Release(ref press) => {
                 self.current_mouse_capture = None;
                 self.current_mouse_buttons.retain(|p| p != press);
+                if self.popup_dismiss_press == Some(*press) {
+                    // The press that closed a tab group popup went no further,
+                    // and neither does its release.
+                    self.popup_dismiss_press = None;
+                    return;
+                }
                 if press == &MousePress::Left && self.window_drag_position.take().is_some() {
                     // Completed a window drag
                     return;
@@ -218,16 +225,23 @@ impl super::TermWindow {
             None
         };
 
-        // A press outside an open tab group popup closes it and goes no
-        // further; in the tab bar it then acts as it would with no popup.
-        if matches!(event.kind, WMEK::Press(_)) && self.open_tab_group_popup().is_some() {
-            let inside = matches!(
-                ui_item.as_ref().map(|item| &item.item_type),
-                Some(UIItemType::TabBar(_)) | Some(UIItemType::TabGroupPopup(_))
-            );
-            if !inside {
-                self.close_tab_group_popup();
-                return;
+        // A press outside an open tab group popup closes it. In the tab bar it
+        // then acts as it would with no popup, and a press on a group's item
+        // toggles that group's popup instead; anywhere else it goes no
+        // further, and neither does its release.
+        if let WMEK::Press(press) = &event.kind {
+            if self.open_popup_tab().is_some() {
+                match press_on_popup(ui_item.as_ref().map(|item| &item.item_type)) {
+                    PressOnPopup::Keep => {}
+                    PressOnPopup::CloseAndAct => self.close_tab_group_popup(),
+                    PressOnPopup::CloseOnly => {
+                        self.close_tab_group_popup();
+                        self.popup_dismiss_press = Some(*press);
+                        // Nor does it count toward a double click.
+                        self.last_mouse_click = None;
+                        return;
+                    }
+                }
             }
         }
 
@@ -493,7 +507,6 @@ impl super::TermWindow {
             WMEK::Press(MousePress::Left) => match item {
                 TabBarItem::Tab { tab_idx, .. } => {
                     self.activate_tab(tab_idx as isize).ok();
-                    self.close_tab_group_popup();
                 }
                 TabBarItem::TabGroup { group_idx, .. } => {
                     self.toggle_tab_group_popup(group_idx);
