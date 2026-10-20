@@ -117,6 +117,13 @@ Named `tabbar-title-memo` until 2026-10-02; plans written before then use that n
 - needs: `unit/tab-order-over-protocol`, `unit/mux-window-set-tab-order`; bootstrap's `configs/wezterm/tab_groups.lua` driver; a mux server on an engine that takes tab orders.
 - why: Once the server owns tab order, every GUI attached to it runs bootstrap's tab groups driver, which calls `MuxWindow:set_tab_order` on a status tick whenever its own arrangement differs from the window's order. Another GUI's reorder arrives as the server's order and the driver follows it as a hand move, so two GUIs that see the same pane directories and checkout map should settle on one order within a tick; nothing has shown it, and a GUI that learns a tab's directory a tick before the other arranges that tab differently for that tick. A case beside `tab-groups-live-check`: two GUIs with the driver on one throwaway server, tabs across projects, then a minute idle, asserting that each GUI's received `TabAddedToWindow` count stops rising after the first arrangement. Signal: `mux.client.recv.TabAddedToWindow` (from `client-resync-counters`) rising in an idle GUI's stats. Promote when the mux server first runs an engine that takes tab orders while two GUIs are attached.
 
+### `tab-order-new-tab-place`
+
+- side: gui
+- state: proposed
+- needs: `unit/tab-order-over-protocol`
+- why: While a tab move made in this client is in flight, a pane list's order is skipped but its new tabs are still added, at the end of their local window (`process_pane_list` appends with `push_tab`). A move sent before the skipped order is read again names every tab of the window, that new tab last, and a server that takes tab orders puts it there: another client's placement of the tab is undone, and every GUI then shows it last. Found by the harden review's fourth gate (invariance) on 2026-10-20 at d63a62ae4. The narrow change: a tab a list adds to an existing local window goes after the tab before it in the list, not at the end; an older server always appends, so nothing changes against one. Test pair: with a move in flight, a list that adds a tab at the front, then a second move, must not send the new tab last; with no move in flight the list's order is shown as now. Signal: none, since nothing records a request that moves a tab no user moved. Promote when a tab another GUI placed is seen at the end after a move here, or when the list application is next changed.
+
 ## Deferred
 
 Decided against for the current topology (one GUI on `human-main`). Not retired; the row returns to Open if the need does.

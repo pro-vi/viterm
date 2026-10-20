@@ -30,11 +30,14 @@ its HOME live in it, so not even a config that fails to load reaches the
 socket of a live session.
 server-dir holds the wezterm-mux-server and wezterm (CLI) binaries to use.
 The GUI window appears on screen while a run is going. Prints PASS or FAIL
-per check and exits 1 on any failure. The checks after a split or a move read
-the GUIs once, after a fixed wait (3 s in ghost, 6 s in order), since some of
-them assert that a move is not undone; on a loaded machine a late answer
-therefore reads as FAIL, and each GUI's log, with timestamps, shows when the
-move and the resyncs happened.
+per check and exits 1 on any failure. The checks after a split, a move or a
+spawn read the GUIs once after a fixed wait, since some of them assert that a
+move is not undone: in ghost 3 s after the split and after the spawn; in order
+about 3 s after the move (the harness waits 6 s once the moving GUI attaches,
+and that GUI moves 3 s after attaching) and 2 s after the moving GUI lists the
+spawned tab. On a loaded machine a late answer therefore reads as FAIL. Each
+GUI's log shows the move with its time; WEZTERM_LOG=wezterm_client::domain=debug
+adds a line for each pane list a GUI applies.
 """
 import collections, json, os, pathlib, re, subprocess, sys, time
 
