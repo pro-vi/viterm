@@ -178,6 +178,11 @@ As features stabilize some brief notes about them will accumulate here.
 - The mux server observes client EOF before queued pane notifications, preserves buffered request bytes, and skips queued render work after disconnect.
 
 * Mux connections receive pane output and alerts only after asking for render changes. One request activates the whole connection, preserving background-pane updates; CLI replies and subscribed key-input echo retain their behavior.
+* Multiplexer: a `wezterm connect` client kept showing a tab that the server
+  had removed, for example after `wezterm cli split-pane --move-pane-id` moved
+  the tab's only pane into another tab; the moved pane then appeared in both
+  tabs, and closing the stale tab killed it. The client now removes such a
+  tab without killing its panes. #6210
 * macOS: Fix window border when opacity<1 and shadow enabled.
   Thanks to @Adams-Galaxy! #8038 #5158
 * perf: Terminal images were hashed three times each on the transmit path; the sha256
