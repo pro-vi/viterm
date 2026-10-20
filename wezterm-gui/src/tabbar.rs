@@ -2,6 +2,8 @@ use crate::termwindow::{PaneInformation, TabInformation, UIItem, UIItemType};
 use config::{ConfigHandle, TabBarColors};
 use finl_unicode::grapheme_clusters::Graphemes;
 use mlua::FromLua;
+use mux::tab::TabId;
+use std::ops::Range;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 use termwiz::cell::{unicode_column_width, Cell, CellAttributes};
@@ -18,6 +20,9 @@ use window::{IntegratedTitleButton, IntegratedTitleButtonAlignment, IntegratedTi
 pub struct TabBarState {
     line: Line,
     items: Vec<TabEntry>,
+    /// The groups folded into one item each, indexed by
+    /// `TabBarItem::TabGroup::group_idx`.
+    folded: Vec<FoldedTabGroup>,
     /// When a tab shows the built-in indeterminate progress spinner, the instant
     /// at which the tab bar should be rebuilt to advance to the next frame;
     /// None when no spinner is visible.
@@ -29,9 +34,106 @@ pub enum TabBarItem {
     None,
     LeftStatus,
     RightStatus,
-    Tab { tab_idx: usize, active: bool },
+    Tab {
+        tab_idx: usize,
+        active: bool,
+    },
+    /// A group of adjacent tabs drawn as one item; `active` when it holds
+    /// the active tab.
+    TabGroup {
+        group_idx: usize,
+        active: bool,
+    },
     NewTabButton,
     WindowButton(IntegratedTitleButton),
+}
+
+/// A run of tabs a config asked to show as one item, with
+/// `window:set_tab_groups`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TabGroupSpec {
+    pub tabs: Vec<TabId>,
+    pub label: String,
+}
+
+/// A group drawn as one item: the tabs it holds, in tab order, each with the
+/// title it would have in the bar.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FoldedTabGroup {
+    pub tabs: Range<usize>,
+    /// The ids of the tabs in `tabs`, which name the group while tabs move.
+    pub ids: Vec<TabId>,
+    pub label: String,
+    pub titles: Vec<Line>,
+}
+
+impl FoldedTabGroup {
+    /// The group's tabs as entries the tab bar's element code draws, the
+    /// active tab marked active.
+    pub fn entries(&self, active_tab: Option<usize>) -> Vec<TabEntry> {
+        self.tabs
+            .clone()
+            .zip(self.titles.iter())
+            .map(|(tab_idx, title)| TabEntry {
+                item: TabBarItem::Tab {
+                    tab_idx,
+                    active: Some(tab_idx) == active_tab,
+                },
+                title: title.clone(),
+                x: 0,
+                width: title.len(),
+            })
+            .collect()
+    }
+}
+
+/// The groups that fold, as (index into `groups`, range of tab indices), in
+/// tab order. A group folds when it names two or more of the tabs in
+/// `tab_ids`, the window's tabs in order, and they are contiguous. A tab
+/// named by an earlier group is not taken again; an id not in the window is
+/// ignored.
+pub fn folded_ranges(groups: &[TabGroupSpec], tab_ids: &[TabId]) -> Vec<(usize, Range<usize>)> {
+    let mut taken = vec![false; tab_ids.len()];
+    let mut out = vec![];
+    for (group_idx, group) in groups.iter().enumerate() {
+        let mut idxs: Vec<usize> = group
+            .tabs
+            .iter()
+            .filter_map(|id| tab_ids.iter().position(|t| t == id))
+            .filter(|&idx| !taken[idx])
+            .collect();
+        idxs.sort_unstable();
+        idxs.dedup();
+        if idxs.len() < 2 {
+            continue;
+        }
+        let range = idxs[0]..idxs[idxs.len() - 1] + 1;
+        if range.len() != idxs.len() {
+            continue;
+        }
+        for idx in range.clone() {
+            taken[idx] = true;
+        }
+        out.push((group_idx, range));
+    }
+    out.sort_by_key(|(_, range)| range.start);
+    out
+}
+
+/// The text of a folded group's item: the numbers of the first and last tabs
+/// it holds, numbered as the tab bar numbers tabs, then its label.
+fn tab_group_text(tabs: &Range<usize>, label: &str, show_index: bool, zero_based: bool) -> String {
+    if show_index {
+        let base = if zero_based { 0 } else { 1 };
+        format!(
+            " {}\u{2013}{}: {} ",
+            tabs.start + base,
+            tabs.end - 1 + base,
+            label
+        )
+    } else {
+        format!(" {} ", label)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -313,8 +415,13 @@ impl TabBarState {
                 x: 1,
                 width: 1,
             }],
+            folded: vec![],
             next_progress_frame_due: None,
         }
+    }
+
+    pub fn folded(&self) -> &[FoldedTabGroup] {
+        &self.folded
     }
 
     pub fn line(&self) -> &Line {
@@ -429,6 +536,7 @@ impl TabBarState {
         config: &ConfigHandle,
         left_status: &str,
         right_status: &str,
+        groups: &[TabGroupSpec],
     ) -> Self {
         let colors = colors.cloned().unwrap_or_else(TabBarColors::default);
 
@@ -543,7 +651,82 @@ impl TabBarState {
             line.append_line(left_status_line, SEQ_ZERO);
         }
 
+        let tab_ids: Vec<TabId> = tab_info.iter().map(|tab| tab.tab_id).collect();
+        let fold = if tab_titles.is_empty() {
+            vec![]
+        } else {
+            folded_ranges(groups, &tab_ids)
+        };
+        let mut folded = vec![];
+        let mut fold_iter = fold.into_iter().peekable();
+        let mut skip_until = 0;
+
         for (tab_idx, tab_title) in tab_titles.iter().enumerate() {
+            if tab_idx < skip_until {
+                continue;
+            }
+            if let Some((group_idx, range)) = fold_iter.next_if(|(_, range)| range.start == tab_idx)
+            {
+                // Every member's title was computed above, so format-tab-title
+                // still runs for each tab; the popup lists them as drawn.
+                let titles = range
+                    .clone()
+                    .map(|idx| {
+                        let esc = format_as_escapes(tab_titles[idx].items.clone())
+                            .expect("already parsed ok above");
+                        parse_status_text(&esc, CellAttributes::default())
+                    })
+                    .collect();
+                let text = tab_group_text(
+                    &range,
+                    &groups[group_idx].label,
+                    config.show_tab_index_in_tab_bar,
+                    config.tab_and_split_indices_are_zero_based,
+                );
+                let width_guess = unicode_column_width(&text, None).min(tab_width_max);
+                let active = range.contains(&active_tab_no);
+                let hover = !active && is_tab_hover(mouse_x, x, width_guess);
+                let cell_attrs = if active {
+                    &active_cell_attrs
+                } else if hover {
+                    &inactive_hover_attrs
+                } else {
+                    &inactive_cell_attrs
+                };
+                let mut group_line = parse_status_text(
+                    &text,
+                    if config.use_fancy_tab_bar {
+                        CellAttributes::default()
+                    } else {
+                        cell_attrs.clone()
+                    },
+                );
+                let title = group_line.clone();
+                if group_line.len() > tab_width_max {
+                    group_line.resize(tab_width_max, SEQ_ZERO);
+                }
+                let width = group_line.len();
+                items.push(TabEntry {
+                    item: TabBarItem::TabGroup {
+                        group_idx: folded.len(),
+                        active,
+                    },
+                    title,
+                    x,
+                    width,
+                });
+                folded.push(FoldedTabGroup {
+                    tabs: range.clone(),
+                    ids: tab_ids[range.clone()].to_vec(),
+                    label: groups[group_idx].label.clone(),
+                    titles,
+                });
+                line.append_line(group_line, SEQ_ZERO);
+                x += width;
+                skip_until = range.end;
+                continue;
+            }
+
             let tab_title_len = tab_title.len.min(tab_width_max);
             let active = tab_idx == active_tab_no;
             let hover = !active && is_tab_hover(mouse_x, x, tab_title_len);
@@ -699,6 +882,7 @@ impl TabBarState {
         Self {
             line,
             items,
+            folded,
             next_progress_frame_due: has_indeterminate_progress.then(next_spinner_frame_due),
         }
     }
@@ -823,4 +1007,173 @@ pub fn parse_status_text(text: &str, default_cell: CellAttributes) -> Line {
     });
     flush_print(&mut print_buffer, &mut cells, &pen);
     Line::from_cells(cells, SEQ_ZERO)
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    fn spec(tabs: &[TabId], label: &str) -> TabGroupSpec {
+        TabGroupSpec {
+            tabs: tabs.to_vec(),
+            label: label.to_string(),
+        }
+    }
+
+    fn tab(tab_id: TabId, tab_index: usize, is_active: bool) -> TabInformation {
+        TabInformation {
+            tab_id,
+            tab_index,
+            is_active,
+            is_last_active: false,
+            active_pane: None,
+            window_id: 0,
+            tab_title: format!("t{tab_id}"),
+        }
+    }
+
+    #[test]
+    fn a_group_of_adjacent_tabs_folds() {
+        let ids = [10, 11, 12, 13, 14];
+        assert_eq!(
+            folded_ranges(&[spec(&[12, 11], "p")], &ids),
+            vec![(0, 1..3)]
+        );
+    }
+
+    #[test]
+    fn a_group_whose_tabs_are_apart_does_not_fold() {
+        let ids = [10, 11, 12, 13];
+        assert_eq!(folded_ranges(&[spec(&[10, 12], "p")], &ids), vec![]);
+    }
+
+    #[test]
+    fn a_group_of_one_tab_does_not_fold() {
+        let ids = [10, 11];
+        assert_eq!(folded_ranges(&[spec(&[11], "p")], &ids), vec![]);
+        assert_eq!(folded_ranges(&[spec(&[11, 11], "p")], &ids), vec![]);
+    }
+
+    #[test]
+    fn a_tab_in_two_groups_belongs_to_the_first() {
+        let ids = [10, 11, 12, 13];
+        let groups = [spec(&[11, 12], "a"), spec(&[12, 13], "b")];
+        assert_eq!(folded_ranges(&groups, &ids), vec![(0, 1..3)]);
+    }
+
+    #[test]
+    fn ids_not_in_the_window_are_ignored() {
+        let ids = [10, 11, 12];
+        assert_eq!(
+            folded_ranges(&[spec(&[99, 11, 12], "p")], &ids),
+            vec![(0, 1..3)]
+        );
+    }
+
+    #[test]
+    fn folded_ranges_come_back_in_tab_order() {
+        let ids = [10, 11, 12, 13, 14];
+        let groups = [spec(&[13, 14], "late"), spec(&[10, 11], "early")];
+        assert_eq!(folded_ranges(&groups, &ids), vec![(1, 0..2), (0, 3..5)]);
+    }
+
+    #[test]
+    fn a_group_reads_its_first_and_last_tab_numbers() {
+        assert_eq!(
+            tab_group_text(&(1..4), "philemon", true, false),
+            " 2\u{2013}4: philemon "
+        );
+        assert_eq!(
+            tab_group_text(&(1..4), "philemon", true, true),
+            " 1\u{2013}3: philemon "
+        );
+        assert_eq!(
+            tab_group_text(&(1..4), "philemon", false, false),
+            " philemon "
+        );
+    }
+
+    #[test]
+    fn the_bar_draws_a_folded_group_as_one_item_in_place_of_its_tabs() {
+        // format-tab-title runs through the main thread's lua state; with none,
+        // every tab takes its default title.
+        config::designate_this_as_the_main_thread();
+        let config = ConfigHandle::default_config();
+        let tabs: Vec<TabInformation> = (0..6).map(|i| tab(10 + i, i as usize, i == 2)).collect();
+        let bar = TabBarState::new(
+            200,
+            None,
+            &tabs,
+            &[],
+            None,
+            &config,
+            "",
+            "",
+            &[spec(&[11, 12, 13], "philemon")],
+        );
+        let kinds: Vec<TabBarItem> = bar
+            .items()
+            .iter()
+            .map(|e| e.item)
+            .filter(|i| matches!(i, TabBarItem::Tab { .. } | TabBarItem::TabGroup { .. }))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                TabBarItem::Tab {
+                    tab_idx: 0,
+                    active: false
+                },
+                TabBarItem::TabGroup {
+                    group_idx: 0,
+                    active: true
+                },
+                TabBarItem::Tab {
+                    tab_idx: 4,
+                    active: false
+                },
+                TabBarItem::Tab {
+                    tab_idx: 5,
+                    active: false
+                },
+            ]
+        );
+        let group = &bar.folded()[0];
+        assert_eq!(group.tabs, 1..4);
+        assert_eq!(group.titles.len(), 3);
+        let text = bar
+            .items()
+            .iter()
+            .find(|e| matches!(e.item, TabBarItem::TabGroup { .. }))
+            .map(|e| e.title.as_str().to_string())
+            .unwrap();
+        assert_eq!(text, " 2\u{2013}4: philemon ");
+    }
+
+    #[test]
+    fn a_group_not_folding_leaves_every_tab_in_the_bar() {
+        // format-tab-title runs through the main thread's lua state; with none,
+        // every tab takes its default title.
+        config::designate_this_as_the_main_thread();
+        let config = ConfigHandle::default_config();
+        let tabs: Vec<TabInformation> = (0..4).map(|i| tab(10 + i, i as usize, false)).collect();
+        let bar = TabBarState::new(
+            200,
+            None,
+            &tabs,
+            &[],
+            None,
+            &config,
+            "",
+            "",
+            &[spec(&[10, 12], "apart")],
+        );
+        let tabs_drawn = bar
+            .items()
+            .iter()
+            .filter(|e| matches!(e.item, TabBarItem::Tab { .. }))
+            .count();
+        assert_eq!(tabs_drawn, 4);
+        assert!(bar.folded().is_empty());
+    }
 }
