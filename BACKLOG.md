@@ -108,3 +108,11 @@ Decided against for the current topology (one GUI on `human-main`). Not retired;
 - needs: A second viewer attached on purpose. Until then this machine wants shared selection: `wezterm cli activate-pane-direction` is supposed to move the one GUI. A codec bump and mux restart for a two-GUI design would be the wrong cost
 - why: Focusing a pane in one GUI moves every other attached GUI's active tab, and a GUI receives its own focus echo. Reproduced 2026-09-19 on a throwaway mux: raising one window moved the other from TAB-0 to TAB-2; the trigger is OS window focus, not a headless activation. The bug is real and not this machine's. There is one GUI; a second on `human-main` is forbidden because it acks attention markers, and isolation would not lift that. The freeze is `pr-7763`, not this. Tab order on relaunch is `tab-order-on-reattach` and does not depend on this while there is one GUI. Build it if a second viewer is ever a workflow
 - notes: `2026-09-19-mux-viewer-selection-and-tab-order.md`
+
+### `termwiz-repaint-follow-ups`
+
+- side: library
+- state: deferred (2026-10-19)
+- needs: a program on this machine that paints through termwiz's `BufferedTerminal`, or an upstream reviewer of `blank-row-keeps-reset` asking about one of these. Nothing in the engine does today: outside `termwiz/` and `wezterm-surface/`, no code uses `BufferedTerminal` or `Surface::get_changes` (searched at `df473bbd6`)
+- why: Two faults in `Surface::repaint_all()`, found by reading while `blank-row-keeps-reset` was reviewed; neither was run. (1) The backward scan for a trailing run of clears takes a line that has text and ends in `ClearToEndOfLine(color)` as part of the run, so on a screen cleared to a colour the forward pass emits `ClearToEndOfScreen` in place of such lines: `Surface::new(3, 2)`, `ClearScreen(Red)`, `"a"`, a move to row 1, `"b"` would leave `"b"` unpainted. (2) `repaint_all()` does not end with the surface's current attributes, so a delta drawn after a repaint starts from whatever the last line left.
+- notes: `2026-10-19-get-text-escapes-drops-reset-after-blank-row.md`
