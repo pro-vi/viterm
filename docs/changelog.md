@@ -162,8 +162,9 @@ As features stabilize some brief notes about them will accumulate here.
 #### Fixed
 * Multiplexer: a split made on the server, or a pane moved into a tab with
   `wezterm cli split-pane --move-pane-id`, reached the other `wezterm connect`
-  clients only at their next resync for some other reason. The server now
-  announces it at once.
+  clients only at their next resync for some other reason, unless it was a
+  split across a whole tab of several panes, which the resize it caused
+  announced. The server now announces every split at once.
 * macOS: Fix window border when opacity<1 and shadow enabled.
   Thanks to @Adams-Galaxy! #8038 #5158
 * perf: Terminal images were hashed three times each on the transmit path; the sha256
