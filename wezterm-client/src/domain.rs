@@ -192,8 +192,9 @@ impl ClientInner {
 
     /// Learn whether the server takes tab orders, unless that is known, with
     /// an empty order for a remote window this client already maps: that
-    /// moves nothing on a server that takes the request. Any failure other
-    /// than one saying the server predates it leaves it to the next sync.
+    /// moves nothing on a server that takes the request. Any answer settles
+    /// it (see `note_tab_order_refusal`); only a request that got no answer
+    /// leaves it to the next sync.
     async fn learn_tab_order_support(&self) {
         if self.tab_order_support() != TabOrderSupport::Unknown {
             return;
@@ -215,16 +216,24 @@ impl ClientInner {
         }
     }
 
-    /// A server that predates `SetWindowTabOrder` answers it with an invalid
-    /// PDU error; it is not sent another, and the log says so once.
+    /// A server that predates `SetWindowTabOrder` cannot decode it and
+    /// answers that the PDU is invalid; it is not sent another, and the log
+    /// says so once. Any other error the server answers, such as that the
+    /// window is gone, shows that it decoded the request, so it takes tab
+    /// orders.
     fn note_tab_order_refusal(&self, err: &anyhow::Error) {
-        if format!("{err:#}").contains("invalid PDU") {
+        let error = format!("{err:#}");
+        if error.contains("invalid PDU") {
             if self.tab_order_support() != TabOrderSupport::No {
                 log::info!("the mux server predates tab orders; tab moves here stay local");
             }
             self.set_tab_order_support(TabOrderSupport::No);
+        } else if error.contains("unexpected response") {
+            // `rpc!` reports every error response as an unexpected response,
+            // an older server's invalid PDU included, so that is checked first.
+            self.set_tab_order_support(TabOrderSupport::Yes);
         } else {
-            log::debug!("set_window_tab_order: {err:#}");
+            log::debug!("set_window_tab_order: {error}");
         }
     }
 
@@ -1654,8 +1663,8 @@ mod test {
     }
 
     /// The client asks once whether the server takes tab orders, with an
-    /// empty order: a server that answers takes them, one that calls the PDU
-    /// invalid predates them, and any other failure is asked again later.
+    /// empty order: a server that calls the PDU invalid predates them, and
+    /// one that gives any other answer, an error included, takes them.
     #[test]
     fn the_server_is_asked_whether_it_takes_tab_orders() {
         let cases: [(&str, Option<&str>, TabOrderSupport); 3] = [
@@ -1668,7 +1677,7 @@ mod test {
             (
                 "window gone",
                 Some("Error: window 100 is invalid"),
-                TabOrderSupport::Unknown,
+                TabOrderSupport::Yes,
             ),
         ];
         for (case, refusal, support) in cases {
@@ -1698,6 +1707,25 @@ mod test {
         let asked =
             f.tab_orders_answered(None, async move { inner.learn_tab_order_support().await });
         assert_eq!(asked, vec![]);
+    }
+
+    /// A question that gets no answer settles nothing; the next sync asks
+    /// again.
+    #[test]
+    fn a_question_with_no_answer_is_asked_again() {
+        let f = Fixture::new();
+        f.resync(pane_list(&[(1, &[10])]));
+        f.run_queued();
+        f.sent.take();
+        let inner = Arc::clone(&f.inner);
+        promise::spawn::spawn(async move { inner.learn_tab_order_support().await }).detach();
+        f.run_queued();
+        let asked = f
+            .sent
+            .answer(|_| Err(anyhow!("no answer: the connection is gone")));
+        f.run_queued();
+        assert!(matches!(asked[..], [Pdu::SetWindowTabOrder(_)]));
+        assert_eq!(f.inner.tab_order_support(), TabOrderSupport::Unknown);
     }
 
     /// A move that the server refuses as an invalid PDU shows that it
