@@ -4,7 +4,9 @@ local wezterm = require("wezterm")
 local sock = os.getenv("PROBE_SOCK")
 assert(sock and sock:match("/tab%-sync%-harness[^/]*/"), "PROBE_SOCK must live under a tab-sync-harness directory")
 local c = wezterm.config_builder()
-c.unix_domains = { { name = "probe", socket_path = sock } }
+-- A GUI that finds no server there fails rather than start one of its own,
+-- which would use the real HOME.
+c.unix_domains = { { name = "probe", socket_path = sock, no_serve_automatically = true } }
 c.default_prog = { "/bin/sleep", "100000" }
 c.automatically_reload_config = false
 c.window_close_confirmation = "NeverPrompt"

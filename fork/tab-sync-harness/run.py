@@ -114,8 +114,8 @@ class Harness:
         return gui
 
     def detach(self, gui):
-        self.guis.remove(gui)
         self.end(gui)
+        self.guis.remove(gui)
 
     def gui_rows(self, gui=None):
         gui = gui or self.guis[-1]
