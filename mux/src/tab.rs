@@ -2391,7 +2391,7 @@ impl Into<String> for SerdeUrl {
 }
 
 #[cfg(test)]
-mod test {
+pub(crate) mod test {
     use super::*;
     use crate::renderable::*;
     use parking_lot::{MappedMutexGuard, Mutex};
@@ -2407,7 +2407,7 @@ mod test {
     // therefore run serially; cargo's default parallel runner would otherwise let
     // them clobber each other's global and cross-deliver notifications. Hold this
     // guard for the lifetime of any such test.
-    static MUX_TEST_GUARD: Mutex<()> = Mutex::new(());
+    pub(crate) static MUX_TEST_GUARD: Mutex<()> = Mutex::new(());
 
     struct FakePane {
         id: PaneId,

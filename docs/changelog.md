@@ -178,6 +178,13 @@ As features stabilize some brief notes about them will accumulate here.
 - The mux server observes client EOF before queued pane notifications, preserves buffered request bytes, and skips queued render work after disconnect.
 
 * Mux connections receive pane output and alerts only after asking for render changes. One request activates the whole connection, preserving background-pane updates; CLI replies and subscribed key-input echo retain their behavior.
+* Multiplexer: moving a tab with [`MoveTab`](./config/lua/keyassignment/MoveTab.md)
+  or [`MoveTabRelative`](./config/lua/keyassignment/MoveTabRelative.md) in a
+  `wezterm connect` client changed the order in that client only; it was lost
+  on reattach, and other clients of the same server did not see it. The move
+  is now sent to the server, and clients of this version show the server's
+  order. A server that predates this keeps its order, and the move stays
+  local as before. #5339
 * Multiplexer: a `wezterm connect` client kept showing a tab that the server
   had removed, for example after `wezterm cli split-pane --move-pane-id` moved
   the tab's only pane into another tab; the moved pane then appeared in both

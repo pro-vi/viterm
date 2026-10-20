@@ -1358,6 +1358,7 @@ impl TermWindow {
                 | MuxNotification::WorkspaceRenamed { .. }
                 | MuxNotification::PaneRemoved(_)
                 | MuxNotification::WindowWorkspaceChanged(_)
+                | MuxNotification::WindowTabOrderChanged(_)
                 | MuxNotification::ActiveWorkspaceChanged(_)
                 | MuxNotification::Empty
                 | MuxNotification::WindowCreated(_) => {}
@@ -1566,7 +1567,8 @@ impl TermWindow {
             | MuxNotification::ActiveWorkspaceChanged(_)
             | MuxNotification::WorkspaceRenamed { .. }
             | MuxNotification::Empty
-            | MuxNotification::WindowWorkspaceChanged(_) => return true,
+            | MuxNotification::WindowWorkspaceChanged(_)
+            | MuxNotification::WindowTabOrderChanged(_) => return true,
             MuxNotification::Alert {
                 alert: Alert::PaletteChanged { .. },
                 ..
@@ -2359,6 +2361,9 @@ impl TermWindow {
         window.set_active_tab_idx_without_saving(tab_idx);
 
         drop(window);
+        if tab_idx != active_tab_idx {
+            mux.notify(MuxNotification::WindowTabOrderChanged(self.mux_window_id));
+        }
         self.update_title();
         self.update_scrollbar();
 
