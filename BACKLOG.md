@@ -5,8 +5,8 @@ entry leaves this file at the moment `git switch -c unit/<slug>` is run. The
 entries the plan of 2026-09-06 proposed keep its relative order, minus
 `mux-socket-buffers`, which has a branch and so lives in `PATCHES.md`.
 `tab-order-on-reattach` replaces that plan's `tab-order-over-protocol` (the
-need, not a chosen mechanism). `flash-message` and `picker-modal` came later
-and have no place in that order yet. Deferred units are decided against
+need, not a chosen mechanism). `flash-message`, `picker-modal` and
+`mux-push-queue-bound` came later and have no place in that order yet. Deferred units are decided against
 for the current topology, not retired; they return if the need does. The
 `notes:` lines name investigation notes in `.inbox/`, which is local to this
 machine and not part of this repo.
@@ -21,8 +21,8 @@ Named `tabbar-title-memo` until 2026-10-02; plans written before then use that n
 
 - side: gui
 - state: proposed
-- needs: Open question: whether the OSC 0 double alert is fixed inside this unit or as a unit of its own
-- why: Marshal-once is `pr-8131-tabbar-lua-once`. Remaining: memoize each tab title on its inputs, coalesce title updates in one event-loop turn, and the OSC 0 double-alert (`2026-09-07-osc0-double-alert-no-title-coalescing.md`). With a `format-tab-title` handler registered, one title notification still rebuilds every tab; `tab-bar-config-once` converts the config into Lua once per rebuild rather than once per call. The size of the remaining benefit is unmeasured until it is built
+- needs: a measurement of the rebuild cost left once `title-update-coalesce` runs, to show whether memoizing is still worth its complexity
+- why: Marshal-once is `pr-8131-tabbar-lua-once`; one config conversion per rebuild is `tab-bar-config-once`; one rebuild per burst of title notifications is `title-update-coalesce`, which also covers the OSC 0 double alert. Remaining: memoize each tab title on its inputs, so a title change in one pane does not run `format-tab-title` for every tab, and convert the config once per config generation rather than once per rebuild. On 2026-10-17 an engine with the first two still spent 26 to 28 ms per rebuild of 41 tabs, so the remaining benefit is real but unmeasured until the coalesce unit has run
 - notes: `2026-09-07-tab-title-rebuild-config-conversion-cost.md`, `2026-09-07-osc0-double-alert-no-title-coalescing.md`
 
 ### `server-zoomed-tab-size`
@@ -77,7 +77,7 @@ Named `tabbar-title-memo` until 2026-10-02; plans written before then use that n
 
 - side: gui
 - state: specified
-- needs: Open question: whether the 0.96→1 scale can be done without re-shaping text per frame
+- needs: a person to look at it once built, because all four checks in its spec are visual. The 0.96→1 scale is not a prerequisite: the spec allows dropping it if it cannot be done without re-shaping text per frame
 - why: `window:flash(text)`: large centred numerals over the panes for transient feedback, so the tab-jump digits do not have to live in the status bar. Chosen from four rendered candidates
 - notes: `2026-09-18-flash-message-unit-spec.md`
 
@@ -88,6 +88,14 @@ Named `tabbar-title-memo` until 2026-10-02; plans written before then use that n
 - needs: A choice between extending `InputSelector` in place, where it stays a grid of cells drawn over the pane (`overlay/selector.rs`), and a new picker built as a `Modal` on `box_model`, as the command palette is (`termwindow/palette.rs`). The first is smaller; the second gets padding, borders and mixed font sizes. Either way the Lua surface is the part that could go upstream, so it is decided first
 - why: `InputSelector` is how a config shows a list of its own rows, and Rust fixes its keys: Enter or a pick letter calls the action once with the chosen row's id and label, Escape calls it with none, and the picker closes (`overlay/selector.rs:207`, `:308`, `:370`). It takes its rows when it opens and reads nothing but keys and mouse after that. So one list cannot offer two actions (copy on Enter, open on another key), one row cannot be dismissed alone, Escape does not say which row was highlighted, a heading cannot be unselectable, and nothing can describe the highlighted row. In order of size, a picker could gain: a key map in its config, with the key's name passed to the action; section headings and a detail line for the highlighted row; an action that keeps the list open and returns new rows; rows that change while it is open, which needs a path from the main thread back into the picker that does not exist today. `box_model` draws text, nested boxes and polygons only (`ElementContent`, `box_model.rs:394`), so an image preview in a picker is renderer work outside this unit. Read at `9000b7ec0`; the fork has not changed `selector.rs`, `modal.rs` or the `InputSelector` struct
 - notes: `2026-10-03-picker-modal-consumers-and-source.md`
+
+### `mux-push-queue-bound`
+
+- side: server
+- state: proposed
+- needs: a sign that the queue grows in practice: the GUI's `get_pane_render_changes` count stops rising while the mux server's footprint climbs. Until that is seen, a change to the push path has nothing to prove itself against
+- why: Each session's outgoing queue (`dispatch.rs`, `smol::channel::unbounded::<Item>()`) takes every push with `try_send`, and `compute_changes()` queues a full `GetPaneRenderChangesResponse` for each output event of each subscribed pane, so one connected client that stops reading grows the server without limit. `mux-render-subscribers` stopped pushes to connections that subscribe to nothing, the multiplier inferred for the server that grew to 296 GB and was killed on 2026-10-08 (queue sizes were not recorded). Since then one server ran from 2026-10-10 to 2026-10-19 between 330 MB and 1.85 GB, and grew 180 MB during seven hours of a saturated GUI main thread on 2026-10-17. If it is built: keep at most one pending render push per pane per session, the newest replacing an unsent one, so a stalled reader costs one push per pane; closing a session whose queue passes a byte limit is the alternative
+- notes: `2026-10-11-per-session-push-queue-still-unbounded.md`
 
 ## Deferred
 
