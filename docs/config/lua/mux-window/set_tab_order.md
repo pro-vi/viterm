@@ -7,9 +7,10 @@ take the places those tabs hold now: a tab the list does not name keeps its
 place, and an id that is not in this window is ignored. The active tab stays
 active. Returns `true` when any tab moved.
 
-A move is announced the way the `MoveTab` key assignment announces one, so
-every client attached to the window, and a mux server that keeps tab order,
-learns the new order. One call replaces as many `MoveTab` steps as there are
+A move is announced the way the `MoveTab` key assignment announces one, so a
+mux server that keeps tab order learns the new order, and so do the clients
+attached to it that are new enough to follow a server's tab order. One call
+replaces as many `MoveTab` steps as there are
 tabs to move, without activating any of them.
 
 ```lua
