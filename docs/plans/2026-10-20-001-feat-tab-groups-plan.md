@@ -2,7 +2,7 @@
 title: Project folders in the tab bar
 objective: Tabs of one project sit together and fold into one stacked tab that opens as a popup, so a 45-tab bar reads by project and every tab stays one Cmd+number away
 type: feat
-status: active
+status: completed
 builder: cold
 date: 2026-10-20
 origin: conversation (slots + tab folders mission), the design page https://claude.ai/artifact/LdjTkZeVmTakNbDaewK3B7 (option D, the popup, picked by the owner; page version 8 made the popup follow the tab-bar look)
