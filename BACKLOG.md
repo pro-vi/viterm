@@ -110,6 +110,13 @@ Named `tabbar-title-memo` until 2026-10-02; plans written before then use that n
 - needs: `unit/tab-groups`, `unit/mux-window-set-tab-order`; bootstrap's `configs/wezterm/tab_groups.lua` driver.
 - why: Nothing re-runs the tab groups on an engine. Bootstrap's CI checks the driver on fake window objects only, and its GUI lane runs stock wezterm, which has no `set_tab_groups`. A case in `fork/tab-sync-harness` (or beside it) on a throwaway mux and GUI would open tabs across projects from a checkout map, assert that each project's tabs are contiguous in the server's order and that `tab_bar_fit` counts each folded group as one item, toggle the popup with `window:toggle_tab_group_popup()`, restart the GUI on an edited saved order while tabs arrive over several ticks, and run once more against an engine without the methods to see nothing change. The same steps were run by hand on engine 20261020-072440-1f588a65 against a mux of the same build and one of 20261018-200420-656e4f47. Signal: none: no job runs the tab groups on an engine. Promote when the next change to the driver or to the engine's tab group code is made.
 
+### `tab-order-two-gui-settle`
+
+- side: both
+- state: proposed
+- needs: `unit/tab-order-over-protocol`, `unit/mux-window-set-tab-order`; bootstrap's `configs/wezterm/tab_groups.lua` driver; a mux server on an engine that takes tab orders.
+- why: Once the server owns tab order, every GUI attached to it runs bootstrap's tab groups driver, which calls `MuxWindow:set_tab_order` on a status tick whenever its own arrangement differs from the window's order. Another GUI's reorder arrives as the server's order and the driver follows it as a hand move, so two GUIs that see the same pane directories and checkout map should settle on one order within a tick; nothing has shown it, and a GUI that learns a tab's directory a tick before the other arranges that tab differently for that tick. A case beside `tab-groups-live-check`: two GUIs with the driver on one throwaway server, tabs across projects, then a minute idle, asserting that each GUI's received `TabAddedToWindow` count stops rising after the first arrangement. Signal: `mux.client.recv.TabAddedToWindow` (from `client-resync-counters`) rising in an idle GUI's stats. Promote when the mux server first runs an engine that takes tab orders while two GUIs are attached.
+
 ## Deferred
 
 Decided against for the current topology (one GUI on `human-main`). Not retired; the row returns to Open if the need does.

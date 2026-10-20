@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Tab sync harness: does a mux-attached GUI show the tabs the server has?
 
-Starts a throwaway mux server from probe.lua, builds two windows of tabs
-through its CLI, attaches a GUI, changes the tabs from the server's side, and
-compares the tabs the GUI lists with the server's.
+Starts a throwaway mux server from probe.lua, runs a scenario with real GUIs
+attached to it, and compares the tabs each GUI lists with the server's.
 
     fork/tab-sync-harness/run.py <scenario> <out-dir> <gui-binary> <server-dir>
 
@@ -21,14 +20,19 @@ scenario:
          GUI attached afterwards must show it too. A tab spawned after the
          move makes every client resync, and the moving GUI must still show
          its move after that, against any server. WATCHER_GUI=<path> runs
-         the first GUI from another binary.
+         the first GUI from another binary; one that predates tab orders
+         fails the checks of its order by design, and its "still attached"
+         and "no lost connection" checks are the ones that count.
 
-out-dir must contain "tab-sync-harness"; the server's socket lives in it.
+out-dir must be new or empty, with a folder whose name starts with
+"tab-sync-harness" in its path, as probe.lua asserts. The server's socket and
+its HOME live in it, so not even a config that fails to load reaches the
+socket of a live session.
 server-dir holds the wezterm-mux-server and wezterm (CLI) binaries to use.
 The GUI window appears on screen while a run is going. Prints PASS or FAIL
 per check and exits 1 on any failure.
 """
-import json, os, shutil, subprocess, sys, time
+import collections, json, os, pathlib, re, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG = os.path.join(HERE, "probe.lua")
@@ -38,12 +42,14 @@ def main():
     if len(sys.argv) != 5:
         sys.exit(__doc__)
     scenario, run, gui_bin, srv_dir = sys.argv[1:]
-    if "tab-sync-harness" not in run:
-        sys.exit("out-dir must contain tab-sync-harness")
+    run = os.path.abspath(run)
+    if not re.search(r"/tab-sync-harness[^/]*/", os.path.join(run, "sock")):
+        sys.exit("out-dir needs a folder whose name starts with tab-sync-harness in its path")
+    if os.path.isdir(run) and os.listdir(run):
+        sys.exit(f"out-dir {run} is not empty; give a new one")
     if scenario not in SCENARIOS:
         sys.exit(f"unknown scenario {scenario}")
-    shutil.rmtree(run, ignore_errors=True)
-    os.makedirs(run)
+    os.makedirs(run, exist_ok=True)
     h = Harness(run, gui_bin, srv_dir)
     try:
         failures = SCENARIOS[scenario](h)
@@ -63,17 +69,22 @@ class Harness:
         self.failures = []
         self.guis = []
         self.started = 0
+        home = os.path.join(run, "home")
+        os.makedirs(home)
         self.server = subprocess.Popen(
             [os.path.join(srv_dir, "wezterm-mux-server"), "--config-file", CONFIG],
-            stdout=open(os.path.join(run, "server.log"), "w"), stderr=subprocess.STDOUT, env=self.env)
-        for _ in range(100):
-            if os.path.exists(self.sock):
-                break
-            time.sleep(0.1)
-        else:
-            pid = self.server.pid
+            stdout=open(os.path.join(run, "server.log"), "w"), stderr=subprocess.STDOUT,
+            env={**self.env, "HOME": home})
+        try:
+            for _ in range(100):
+                if os.path.exists(self.sock):
+                    break
+                time.sleep(0.1)
+            else:
+                raise RuntimeError(f"the server (pid {self.server.pid}) made no socket in 10 s; stopped it")
+        except BaseException:
             self.stop()
-            raise RuntimeError(f"the server (pid {pid}) made no socket in 10 s; stopped it")
+            raise
 
     def cli(self, *args, sock=None):
         env = {**self.env, "WEZTERM_UNIX_SOCKET": sock or self.sock}
@@ -103,14 +114,8 @@ class Harness:
         return gui
 
     def detach(self, gui):
-        gui.terminate()
-        gui.wait(10)
         self.guis.remove(gui)
-        # A GUI ended by a signal leaves its socket file behind.
-        try:
-            os.unlink(gui.sock)
-        except FileNotFoundError:
-            pass
+        self.end(gui)
 
     def gui_rows(self, gui=None):
         gui = gui or self.guis[-1]
@@ -123,7 +128,7 @@ class Harness:
             try:
                 if len(tabs(self.gui_rows(gui))) == n:
                     return True
-            except (RuntimeError, json.JSONDecodeError):
+            except (RuntimeError, json.JSONDecodeError, subprocess.TimeoutExpired):
                 pass
             time.sleep(0.25)
         return False
@@ -138,18 +143,22 @@ class Harness:
             json.dump(rows, f, indent=1)
 
     def stop(self):
-        for proc in self.guis + [self.server]:
-            if proc.poll() is None:
-                proc.terminate()
-                try:
-                    proc.wait(5)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
         for gui in self.guis:
+            self.end(gui)
+        self.end(self.server)
+
+    def end(self, proc):
+        """End a GUI or the server, killing it if it outlives 5 s. A GUI's
+        socket file goes too: one ended by a signal leaves it behind."""
+        if proc.poll() is None:
+            proc.terminate()
             try:
-                os.unlink(gui.sock)
-            except FileNotFoundError:
-                pass
+                proc.wait(5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        if proc is not self.server:
+            pathlib.Path(proc.sock).unlink(missing_ok=True)
 
 
 def tabs(rows):
@@ -168,10 +177,7 @@ def panes_in_two_tabs(rows):
 
 
 def tabs_per_window(rows):
-    counts = {}
-    for w, _t, _p in tabs(rows):
-        counts[w] = counts.get(w, 0) + 1
-    return sorted(counts.values())
+    return sorted(collections.Counter(w for w, _t, _p in tabs(rows)).values())
 
 
 def first_pane(h):
@@ -196,8 +202,8 @@ def same_as_server(h, when, server, gui):
 
 
 def ghost(h):
-    first = [first_pane(h)]
-    w1, a = first[0]["window_id"], first[0]["pane_id"]
+    first = first_pane(h)
+    w1, a = first["window_id"], first["pane_id"]
     h.cli("spawn", "--window-id", str(w1))
     c = int(h.cli("spawn", "--new-window"))
     w2 = next(r["window_id"] for r in h.server_rows() if r["pane_id"] == c)
@@ -215,7 +221,7 @@ def ghost(h):
     h.save("gui-after-move", gui)
     moved = next(r for r in server if r["pane_id"] == x)
     h.check("server: the moved pane is in the first tab, the emptied tab is gone",
-            moved["tab_id"] == first[0]["tab_id"] and len(tabs(server)) == 4,
+            moved["tab_id"] == first["tab_id"] and len(tabs(server)) == 4,
             f"{len(tabs(server))} tabs")
     # The server announces the move only if a split notifies its clients;
     # without that the GUI catches up at its next resync for another reason.
@@ -236,13 +242,10 @@ def ghost(h):
 
 
 def titles_in_order(rows):
-    """The tab titles of the first window, in list order."""
+    """The tab titles of the first window, one per tab, in list order."""
     window = rows[0]["window_id"]
-    seen = []
-    for r in rows:
-        if r["window_id"] == window and r["tab_title"] not in seen:
-            seen.append(r["tab_title"])
-    return seen
+    by_tab = dict.fromkeys((r["tab_id"], r["tab_title"]) for r in rows if r["window_id"] == window)
+    return [title for _tab, title in by_tab]
 
 
 def order(h):
