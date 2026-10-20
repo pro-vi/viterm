@@ -580,7 +580,7 @@ impl ClientDomain {
                 tab.sync_with_pane_tree(root_size, tabroot, |entry| {
                     workspace.replace(entry.workspace.clone());
                     remote_panes_to_forget.remove(&entry.pane_id);
-                    if let Some(pane_id) = inner.remote_to_local_pane_id(entry.pane_id) {
+                    let pane = if let Some(pane_id) = inner.remote_to_local_pane_id(entry.pane_id) {
                         match mux.get_pane(pane_id) {
                             Some(pane) => pane,
                             None => {
@@ -615,7 +615,14 @@ impl ClientDomain {
                         );
                         mux.add_pane(&pane).expect("failed to add pane to mux");
                         pane
+                    };
+                    // A pane draws nothing until the server pushes a change,
+                    // so one that stays quiet would report no working directory
+                    // for as long as it is quiet; the listing carries it.
+                    if let Some(client_pane) = pane.downcast_ref::<ClientPane>() {
+                        client_pane.seed_working_dir(entry.working_dir.clone().map(Into::into));
                     }
+                    pane
                 });
 
                 if let Some(local_window_id) = inner.remote_to_local_window(remote_window_id) {

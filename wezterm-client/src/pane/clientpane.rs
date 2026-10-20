@@ -250,6 +250,18 @@ impl ClientPane {
     pub fn ignore_next_kill(&self) {
         *self.ignore_next_kill.lock() = true;
     }
+
+    /// Take the working directory the server listed for this pane. Until the
+    /// server pushes a render change for a pane, which it does only once the
+    /// pane draws something, the client knows no directory for it; the pane
+    /// listing that every attach and resync reads already carries one. A later
+    /// render push replaces it as before, and a listing without one leaves the
+    /// directory alone.
+    pub fn seed_working_dir(&self, working_dir: Option<Url>) {
+        if let Some(dir) = working_dir {
+            self.renderable.lock().inner.borrow_mut().working_dir = Some(dir);
+        }
+    }
 }
 
 #[async_trait(?Send)]
