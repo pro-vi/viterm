@@ -109,6 +109,19 @@ impl UserData for GuiWin {
                 Ok(())
             },
         );
+        methods.add_async_method("toggle_tab_group_popup", |_, this, _: ()| async move {
+            let (tx, rx) = smol::channel::bounded(1);
+            this.window.notify(TermWindowNotif::ToggleTabGroupPopup(tx));
+            rx.recv()
+                .await
+                .map_err(|e| anyhow::anyhow!("{:#}", e))
+                .map_err(luaerr)
+        });
+        methods.add_method("set_tab_groups", |_, this, groups: mlua::Value| {
+            let groups = parse_tab_groups(groups)?;
+            this.window.notify(TermWindowNotif::SetTabGroups(groups));
+            Ok(())
+        });
         methods.add_method(
             "set_left_status",
             |_, this, (status, row): (String, Option<usize>)| {
@@ -379,5 +392,88 @@ impl UserData for GuiWin {
                 Ok(result)
             },
         );
+    }
+}
+
+/// The groups `window:set_tab_groups` was given: a list of
+/// `{ tabs = {tab_id, ...}, label = "..." }`. Anything else is an error that
+/// names the entry, so a mistake shows in the log instead of as a tab bar
+/// that silently stays as it was.
+fn parse_tab_groups(groups: mlua::Value) -> mlua::Result<Vec<crate::tabbar::TabGroupSpec>> {
+    let fail = |msg: String| mlua::Error::external(format!("set_tab_groups: {msg}"));
+    let groups = match groups {
+        mlua::Value::Table(t) => t,
+        _ => return Err(fail("expected a list of groups".to_string())),
+    };
+    let mut specs = vec![];
+    for (i, entry) in groups.sequence_values::<mlua::Value>().enumerate() {
+        let n = i + 1;
+        let entry = match entry? {
+            mlua::Value::Table(t) => t,
+            _ => return Err(fail(format!("entry {n} is not a table"))),
+        };
+        let label = match entry.get::<_, mlua::Value>("label")? {
+            mlua::Value::String(s) => s.to_str()?.to_string(),
+            _ => return Err(fail(format!("entry {n}: label must be a string"))),
+        };
+        let ids = match entry.get::<_, mlua::Value>("tabs")? {
+            mlua::Value::Table(t) => t,
+            _ => return Err(fail(format!("entry {n}: tabs must be a list of tab ids"))),
+        };
+        let mut tabs = vec![];
+        for id in ids.sequence_values::<mlua::Value>() {
+            match id? {
+                mlua::Value::Integer(id) if id >= 0 => tabs.push(id as mux::tab::TabId),
+                mlua::Value::Number(id) if id >= 0. && id.fract() == 0. => {
+                    tabs.push(id as mux::tab::TabId)
+                }
+                _ => return Err(fail(format!("entry {n}: tabs must be a list of tab ids"))),
+            }
+        }
+        specs.push(crate::tabbar::TabGroupSpec { tabs, label });
+    }
+    Ok(specs)
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    fn parse(src: &str) -> mlua::Result<Vec<crate::tabbar::TabGroupSpec>> {
+        let lua = mlua::Lua::new();
+        let value: mlua::Value = lua.load(src).eval().unwrap();
+        parse_tab_groups(value)
+    }
+
+    #[test]
+    fn groups_parse_in_order_with_their_tabs_and_labels() {
+        let groups =
+            parse(r#"{ { tabs = { 3, 4 }, label = "p" }, { tabs = {}, label = "q" } }"#).unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].tabs, vec![3, 4]);
+        assert_eq!(groups[0].label, "p");
+        assert!(groups[1].tabs.is_empty());
+    }
+
+    #[test]
+    fn an_empty_list_clears_the_groups() {
+        assert!(parse("{}").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_bad_entry_is_an_error_that_names_it() {
+        let err = |src: &str| parse(src).unwrap_err().to_string();
+        assert!(
+            err(r#"{ { tabs = { 1 }, label = 3 } }"#).contains("entry 1: label must be a string")
+        );
+        assert!(
+            err(r#"{ { tabs = { 1 }, label = "a" }, { tabs = "x", label = "b" } }"#)
+                .contains("entry 2: tabs must be a list of tab ids")
+        );
+        assert!(
+            err(r#"{ { tabs = { 1.5 }, label = "a" } }"#).contains("entry 1: tabs must be a list")
+        );
+        assert!(err(r#"{ 7 }"#).contains("entry 1 is not a table"));
+        assert!(err(r#""groups""#).contains("expected a list of groups"));
     }
 }

@@ -17,9 +17,14 @@ impl crate::TermWindow {
         if self.config.use_fancy_tab_bar {
             if self.fancy_tab_bar.is_none() {
                 let palette = self.palette().clone();
-                let (tab_bar, fit) = self.build_fancy_tab_bar(&palette)?;
+                let (tab_bar, fit, popup) = self.build_fancy_tab_bar(&palette)?;
                 self.fancy_tab_bar.replace(tab_bar);
                 self.tab_bar_fit = fit;
+                self.tab_group_popup_elements = popup;
+                // The open popup copied the last layout; give it this one.
+                if self.open_tab_group_popup().is_some() {
+                    self.invalidate_modal();
+                }
             }
 
             self.ui_items.append(&mut self.paint_fancy_tab_bar()?);

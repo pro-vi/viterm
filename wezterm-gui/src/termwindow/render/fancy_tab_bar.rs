@@ -4,6 +4,7 @@ use crate::termwindow::box_model::*;
 use crate::termwindow::render::corners::*;
 
 use crate::termwindow::render::window_buttons::window_button_element;
+use crate::termwindow::tabgrouppopup;
 use crate::termwindow::{UIItem, UIItemType};
 use crate::utilsprites::RenderMetrics;
 use config::{
@@ -265,6 +266,70 @@ impl TabLook {
         marked.item_type = item_type;
         marked
     }
+
+    /// A folded tab group: its item with two layers showing past its trailing
+    /// edge, the nearest first, so it reads as a stack of tabs. The layers take
+    /// the tab's own corners, so they follow the shape the style draws.
+    fn stack(
+        &self,
+        mut tab: Element,
+        font: &Rc<LoadedFont>,
+        active: bool,
+        layers: [LinearRgba; 2],
+    ) -> Element {
+        let item_type = tab.item_type.take();
+        let mut stacked = tab.margin(BoxDimension::new(Dimension::Pixels(0.)));
+        for color in layers {
+            stacked = Element::new(font, ElementContent::Children(vec![stacked]))
+                .vertical_align(VerticalAlign::Top)
+                .padding(BoxDimension {
+                    left: Dimension::Pixels(0.),
+                    right: Dimension::Cells(STACK_STEP),
+                    top: Dimension::Pixels(0.),
+                    bottom: Dimension::Pixels(0.),
+                })
+                .border_corners(self.corners(active, self.height))
+                .colors(ElementColors {
+                    border: BorderColor::new(color),
+                    bg: color.into(),
+                    text: InheritableColor::Inherited,
+                });
+        }
+        stacked = stacked
+            .vertical_align(self.vertical_align())
+            .margin(self.margin());
+        stacked.item_type = item_type;
+        stacked
+    }
+}
+
+/// How far each layer of a folded tab group shows past the one in front, in
+/// cells of the tab bar font.
+const STACK_STEP: f32 = 0.3;
+
+impl TabLook {
+    /// The corners of the popup a folded group opens, a box `height` pixels
+    /// tall: the tab's own shape, on all four corners where a rounded tab
+    /// rounds only the two away from the terminal.
+    fn popup_corners(&self, height: f32) -> Option<Corners> {
+        match self.style.tab_shape {
+            TabShape::Rounded => {
+                let size = self.style.tab_corner_size;
+                let round = |poly| SizedPoly {
+                    width: size,
+                    height: size,
+                    poly,
+                };
+                Some(Corners {
+                    top_left: round(TOP_LEFT_ROUNDED_CORNER),
+                    top_right: round(TOP_RIGHT_ROUNDED_CORNER),
+                    bottom_left: round(BOTTOM_LEFT_ROUNDED_CORNER),
+                    bottom_right: round(BOTTOM_RIGHT_ROUNDED_CORNER),
+                })
+            }
+            _ => self.corners(true, height),
+        }
+    }
 }
 
 const X_BUTTON: &[Poly] = &[
@@ -347,8 +412,10 @@ fn cut_title(item: &TabEntry, cells: usize) -> TabEntry {
             .map(|cell| cell.attrs().clone())
             .unwrap_or_else(CellAttributes::default);
         item.title.resize(keep, SEQ_ZERO);
-        item.title
-            .append_line(Line::from_text("\u{2026} ", &attrs, SEQ_ZERO, None), SEQ_ZERO);
+        item.title.append_line(
+            Line::from_text("\u{2026} ", &attrs, SEQ_ZERO, None),
+            SEQ_ZERO,
+        );
     }
     item
 }
@@ -420,10 +487,16 @@ impl crate::TermWindow {
         self.fancy_tab_bar.take();
     }
 
+    /// The tab bar, how it fitted its tabs, and the open tab group popup laid
+    /// out against it, if one is open.
     pub fn build_fancy_tab_bar(
         &self,
         palette: &ColorPalette,
-    ) -> anyhow::Result<(ComputedElement, Option<TabBarFit>)> {
+    ) -> anyhow::Result<(
+        ComputedElement,
+        Option<TabBarFit>,
+        Option<Vec<ComputedElement>>,
+    )> {
         let tab_bar_height = self.tab_bar_pixel_height()?;
         let font = self.fonts.title_font()?;
         let metrics = RenderMetrics::with_font_metrics(&font.metrics());
@@ -482,11 +555,13 @@ impl crate::TermWindow {
 
         let item_to_elem = |item: &TabEntry| -> Element {
             let title = match item.item {
-                TabBarItem::Tab { active, .. } => paint_title(
-                    &item.title,
-                    style.title_background_paints,
-                    !active || style.active_tab_title_background,
-                ),
+                TabBarItem::Tab { active, .. } | TabBarItem::TabGroup { active, .. } => {
+                    paint_title(
+                        &item.title,
+                        style.title_background_paints,
+                        !active || style.active_tab_title_background,
+                    )
+                }
                 _ => Cow::Borrowed(&item.title),
             };
             let element = Element::with_line(&font, &title, palette);
@@ -564,7 +639,8 @@ impl crate::TermWindow {
                     bg: new_tab_hover.bg_color.to_linear().into(),
                     text: new_tab_hover.fg_color.to_linear().into(),
                 })),
-                TabBarItem::Tab { active, .. } if active => {
+                TabBarItem::Tab { active: true, .. }
+                | TabBarItem::TabGroup { active: true, .. } => {
                     let bg = bg_color
                         .unwrap_or_else(|| active_tab.bg_color.into())
                         .to_linear();
@@ -584,7 +660,7 @@ impl crate::TermWindow {
                                 .into(),
                         })
                 }
-                TabBarItem::Tab { .. } => element
+                TabBarItem::Tab { .. } | TabBarItem::TabGroup { .. } => element
                     .vertical_align(look.vertical_align())
                     .item_type(UIItemType::TabBar(item.item.clone()))
                     .margin(look.margin())
@@ -642,7 +718,9 @@ impl crate::TermWindow {
         let num_tabs: f32 = items
             .iter()
             .map(|item| match item.item {
-                TabBarItem::NewTabButton | TabBarItem::Tab { .. } => 1.,
+                TabBarItem::NewTabButton | TabBarItem::Tab { .. } | TabBarItem::TabGroup { .. } => {
+                    1.
+                }
                 _ => 0.,
             })
             .sum();
@@ -671,19 +749,28 @@ impl crate::TermWindow {
             );
         }
 
+        let stack_layers = {
+            let edge = colors.inactive_tab_edge().to_linear();
+            [edge, edge.mul_alpha(0.55)]
+        };
         let tab_elem = |item: &TabEntry, tab_idx: usize, active: bool, max_width: f32| {
+            let is_group = matches!(item.item, TabBarItem::TabGroup { .. });
             let mut elem = item_to_elem(item);
             elem.max_width = Some(Dimension::Pixels(max_width));
             elem.content = match elem.content {
                 ElementContent::Text(_) => unreachable!(),
                 ElementContent::Poly { .. } => unreachable!(),
                 ElementContent::Children(mut kids) => {
-                    if self.config.show_close_tab_button_in_tabs {
+                    // A group closes no tab: its tabs are closed one by one.
+                    if self.config.show_close_tab_button_in_tabs && !is_group {
                         kids.push(make_x_button(&font, &metrics, &colors, tab_idx, active));
                     }
                     ElementContent::Children(kids)
                 }
             };
+            if is_group {
+                elem = look.stack(elem, &font, active, stack_layers);
+            }
             if active {
                 elem = look.mark(elem, &font, marker_color);
             }
@@ -720,6 +807,14 @@ impl crate::TermWindow {
                     }
                 }
                 TabBarItem::Tab { tab_idx, active } => tab_items.push((item, tab_idx, active)),
+                TabBarItem::TabGroup { group_idx, active } => {
+                    let first = self
+                        .tab_bar
+                        .folded()
+                        .get(group_idx)
+                        .map_or(0, |group| group.tabs.start);
+                    tab_items.push((item, first, active))
+                }
                 TabBarItem::NewTabButton => new_tab_ele = Some(item_to_elem(item)),
             }
         }
@@ -777,16 +872,16 @@ impl crate::TermWindow {
         };
 
         let measure = |ele: Element| -> anyhow::Result<f32> {
-            Ok(self
-                .compute_element(&layout_context, &ele)?
-                .bounds
-                .width())
+            Ok(self.compute_element(&layout_context, &ele)?.bounds.width())
         };
         let status_width = |status: &Vec<Element>| -> anyhow::Result<f32> {
             if status.is_empty() {
                 Ok(0.)
             } else {
-                measure(Element::new(&font, ElementContent::Children(status.clone())))
+                measure(Element::new(
+                    &font,
+                    ElementContent::Children(status.clone()),
+                ))
             }
         };
         // The status of one row as elements: its entries, then any window
@@ -906,8 +1001,10 @@ impl crate::TermWindow {
                     .map(|ele| measure(ele.clone()))
                     .sum::<anyhow::Result<f32>>()?;
                 caps[0] -= lead_width;
-                let title_len: Vec<usize> =
-                    tab_items.iter().map(|(item, _, _)| item.title.len()).collect();
+                let title_len: Vec<usize> = tab_items
+                    .iter()
+                    .map(|(item, _, _)| item.title.len())
+                    .collect();
                 let max_len = title_len.iter().copied().max().unwrap_or(0);
                 let floor = self.config.tab_min_width.min(max_len);
                 let mut measured: HashMap<(usize, usize), f32> = HashMap::new();
@@ -1042,8 +1139,7 @@ impl crate::TermWindow {
             let left = std::mem::take(&mut row_left_status[0]);
             if !left.is_empty() {
                 children.push(
-                    Element::new(&font, ElementContent::Children(left))
-                        .colors(bar_colors.clone()),
+                    Element::new(&font, ElementContent::Children(left)).colors(bar_colors.clone()),
                 );
             }
 
@@ -1074,7 +1170,7 @@ impl crate::TermWindow {
             .min_width(Some(Dimension::Pixels(self.dimensions.pixel_width as f32)))
             .min_height(Some(Dimension::Pixels(tab_bar_height)))
             .vertical_align(look.vertical_align())
-            .colors(bar_colors);
+            .colors(bar_colors.clone());
 
         let mut computed = self.compute_element(&layout_context, &tabs)?;
 
@@ -1088,7 +1184,131 @@ impl crate::TermWindow {
             },
         ));
 
-        Ok((computed, fit_report))
+        // The open popup: the group's tabs, drawn by the same element code as
+        // the bar's tabs, in a box of the bar's color with the style's
+        // corners, next to the group's item, with a point aimed at it.
+        let open_group = self.open_tab_group_popup().and_then(|open| {
+            let group_idx = self
+                .tab_bar
+                .folded()
+                .iter()
+                .position(|g| g.ids.contains(&open))?;
+            let anchor = computed.ui_items().into_iter().find(|item| {
+                matches!(item.item_type,
+                    UIItemType::TabBar(TabBarItem::TabGroup { group_idx: g, .. }) if g == group_idx)
+            })?;
+            Some((group_idx, anchor))
+        });
+        let popup = match open_group {
+            Some((group_idx, anchor)) => {
+                let group = &self.tab_bar.folded()[group_idx];
+                let active_tab = mux::Mux::get()
+                    .get_window(self.mux_window_id)
+                    .map(|window| window.get_active_tab_idx());
+                let mut entries = vec![];
+                for entry in group.entries(active_tab) {
+                    let (tab_idx, active) = match entry.item {
+                        TabBarItem::Tab { tab_idx, active } => (tab_idx, active),
+                        _ => continue,
+                    };
+                    let mut elem = item_to_elem(&entry);
+                    if active {
+                        elem = look.mark(elem, &font, marker_color);
+                    }
+                    elem.item_type = Some(UIItemType::TabGroupPopup(Some(tab_idx)));
+                    entries.push(elem);
+                }
+                let edge = colors.inactive_tab_hover().bg_color.to_linear();
+                let cell_height = metrics.cell_size.height as f32;
+                let popup_box = Element::new(&font, ElementContent::Children(entries))
+                    .item_type(UIItemType::TabGroupPopup(None))
+                    .vertical_align(VerticalAlign::Middle)
+                    .padding(BoxDimension {
+                        left: Dimension::Cells(0.4),
+                        right: Dimension::Cells(0.4),
+                        top: Dimension::Cells(0.2),
+                        bottom: Dimension::Cells(0.2),
+                    })
+                    .border(BoxDimension::new(Dimension::Pixels(1.)))
+                    .border_corners(look.popup_corners(look.height + 0.4 * cell_height + 2.))
+                    .colors(ElementColors {
+                        border: BorderColor::new(edge),
+                        bg: bar_colors.bg.clone(),
+                        text: bar_colors.text.clone(),
+                    });
+                let window_width = self.dimensions.pixel_width as f32;
+                let popup_context = LayoutContext {
+                    height: height_context,
+                    width: width_context,
+                    bounds: euclid::rect(
+                        0.,
+                        0.,
+                        (window_width - 8.).max(1.),
+                        self.dimensions.pixel_height as f32,
+                    ),
+                    metrics: &metrics,
+                    gl_state: self.render_state.as_ref().unwrap(),
+                    zindex: 100,
+                };
+                let mut boxed = self.compute_element(&popup_context, &popup_box)?;
+                let item = euclid::rect(
+                    anchor.x as f32,
+                    anchor.y as f32,
+                    anchor.width as f32,
+                    anchor.height as f32,
+                );
+                let point_height = (cell_height * 0.5).round().max(4.);
+                let point_width = (point_height * 1.6).round();
+                let at_bottom = self.config.tab_bar_at_bottom;
+                let origin = tabgrouppopup::popup_origin(
+                    item,
+                    boxed.bounds.size.to_untyped(),
+                    window_width,
+                    at_bottom,
+                    point_height,
+                    4.,
+                );
+                boxed.translate(euclid::vec2(origin.x, origin.y));
+                let point = Element::new(
+                    &font,
+                    ElementContent::Poly {
+                        line_width: metrics.underline_height.max(1),
+                        poly: SizedPoly {
+                            poly: if at_bottom {
+                                TAB_GROUP_POINT_DOWN
+                            } else {
+                                TAB_GROUP_POINT_UP
+                            },
+                            width: Dimension::Pixels(point_width),
+                            height: Dimension::Pixels(point_height),
+                        },
+                    },
+                )
+                .colors(ElementColors {
+                    border: BorderColor::default(),
+                    bg: LinearRgba::TRANSPARENT.into(),
+                    text: edge.into(),
+                });
+                let mut point = self.compute_element(&popup_context, &point)?;
+                let point_x = tabgrouppopup::caret_x(
+                    item,
+                    origin.x,
+                    boxed.bounds.width(),
+                    point_width,
+                    look.corner_x.max(cell_height / 2.),
+                );
+                let point_y = if at_bottom {
+                    origin.y + boxed.bounds.height() - 1.
+                } else {
+                    origin.y - point_height + 1.
+                };
+                point.translate(euclid::vec2(point_x, point_y));
+                Some(vec![boxed, point])
+            }
+            None => None,
+        };
+
+        Ok((computed, fit_report, popup))
     }
 
     pub fn paint_fancy_tab_bar(&self) -> anyhow::Result<Vec<UIItem>> {
