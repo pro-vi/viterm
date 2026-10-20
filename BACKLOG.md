@@ -89,6 +89,20 @@ Named `tabbar-title-memo` until 2026-10-02; plans written before then use that n
 - why: Each session's outgoing queue (`dispatch.rs`, `smol::channel::unbounded::<Item>()`) takes every push with `try_send`, and `compute_changes()` queues a full `GetPaneRenderChangesResponse` for each output event of each subscribed pane, so one connected client that stops reading grows the server without limit. `mux-render-subscribers` stopped pushes to connections that subscribe to nothing, the multiplier inferred for the server that grew to 296 GB and was killed on 2026-10-08 (queue sizes were not recorded). Since then one server ran from 2026-10-10 to 2026-10-19 between 330 MB and 1.85 GB, and grew 180 MB during seven hours of a saturated GUI main thread on 2026-10-17. If it is built: keep at most one pending render push per pane per session, the newest replacing an unsent one, so a stalled reader costs one push per pane; closing a session whose queue passes a byte limit is the alternative
 - notes: `2026-10-11-per-session-push-queue-still-unbounded.md`
 
+### `tab-bar-drag`
+
+- side: gui
+- state: proposed
+- needs: `unit/tab-groups` (base). Plan `docs/plans/2026-10-20-001-feat-tab-groups-plan.md` U10.
+- why: A press, drag and release on a tab or a folded tab group in the fancy tab bar should move it, a group moving its whole run, through `Window::set_tab_order` and `WindowTabOrderChanged` as `move_tab` does; a config that keeps a folder order (bootstrap's `tab_groups.lua`) then reads the new order on its next tick. Today the order changes only through `MoveTab` keys and Lua. The new order is a pure function of (items, dragged item, drop slot), which is the tested seam; no tool here drives mouse input into a native window, so the press path waits for a person.
+
+### `tab-bar-motion`
+
+- side: gui
+- state: proposed
+- needs: `unit/tab-groups` (base). Plan `docs/plans/2026-10-20-001-feat-tab-groups-plan.md` U11.
+- why: When a folded group opens or closes, or a tab moves into its group, the drawn boxes jump between layouts. Keeping each item's previous rect by key and easing to the new one over about half a second, with frames scheduled through `update_next_frame_time` (the spinner's path), would show the move without any Lua during it; with the window unfocused the final layout is drawn at once. `colorease.rs` has curves; nothing eases a position yet.
+
 ## Deferred
 
 Decided against for the current topology (one GUI on `human-main`). Not retired; the row returns to Open if the need does.
