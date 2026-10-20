@@ -62,9 +62,9 @@ pub enum MuxNotification {
     WindowRemoved(WindowId),
     WindowInvalidated(WindowId),
     WindowWorkspaceChanged(WindowId),
-    /// A new order for a window's tabs was decided in this process. A client
-    /// that applies the order its server reports does not raise this, so
-    /// that the order is not sent back.
+    /// A window's tabs were put in a new order. A client that applies the
+    /// order its server reports does not raise this, so that the order is
+    /// not sent back.
     WindowTabOrderChanged(WindowId),
     ActiveWorkspaceChanged(Arc<ClientId>),
     Alert {

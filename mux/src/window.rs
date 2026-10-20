@@ -249,8 +249,8 @@ impl Window {
     /// tabs hold now; a tab it does not name keeps its place, and an id that
     /// is not in this window is ignored. The active tab stays active.
     /// Returns true if any tab moved. Like the other tab changes here, it
-    /// raises only WindowInvalidated; the caller that decided the order
-    /// raises WindowTabOrderChanged.
+    /// raises only WindowInvalidated; the caller raises
+    /// WindowTabOrderChanged, unless it applies an order its server reported.
     pub fn set_tab_order(&mut self, order: &[TabId]) -> bool {
         let rank = |tab: &Arc<Tab>| order.iter().position(|id| *id == tab.tab_id());
         let places: Vec<usize> = (0..self.tabs.len())

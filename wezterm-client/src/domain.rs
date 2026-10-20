@@ -241,9 +241,12 @@ impl ClientInner {
     }
 
     /// A server that predates `SetWindowTabOrder` answers it with an invalid
-    /// PDU error; it is not sent another.
+    /// PDU error; it is not sent another, and the log says so once.
     fn note_tab_order_refusal(&self, err: &anyhow::Error) {
         if format!("{err:#}").contains("invalid PDU") {
+            if self.tab_order_support() != TabOrderSupport::No {
+                log::info!("the mux server predates tab orders; tab moves here stay local");
+            }
             self.set_tab_order_support(TabOrderSupport::No);
         } else {
             log::debug!("set_window_tab_order: {err:#}");
@@ -262,10 +265,12 @@ impl ClientInner {
     }
 
     /// Send the order of a moved local window to `remote_windows`, unless
-    /// the server is known to predate the request. The move counts as
-    /// queued in the same poll that queues every one of its requests, which
-    /// are started together so that none waits behind an answer; a pane list
-    /// asked for afterwards is behind all of them on the wire.
+    /// the server is known to predate the request, for a move counted with
+    /// `count_tab_move`. A move with requests counts as queued in the same
+    /// poll that queues every one of them, which are started together so
+    /// that none waits behind an answer; a pane list asked for afterwards is
+    /// behind all of them on the wire. A move with none stops counting as
+    /// made.
     async fn send_tab_orders(&self, local_window_id: WindowId, remote_windows: Vec<WindowId>) {
         let requests = if self.tab_order_support() == TabOrderSupport::No {
             vec![]
@@ -274,6 +279,10 @@ impl ClientInner {
         };
         {
             let mut moves = self.tab_moves.lock().unwrap();
+            debug_assert!(
+                moves.made > moves.queued,
+                "a tab move sent without being counted"
+            );
             if requests.is_empty() {
                 moves.made -= 1;
             } else {
@@ -1414,8 +1423,7 @@ impl Domain for ClientDomain {
                     "Server has {} tabs.  Attaching to local UI...\n",
                     panes.tabs.len()
                 ));
-                ClientDomain::finish_attach(domain_id, client, panes, window_id)?;
-                Ok(())
+                ClientDomain::finish_attach(domain_id, client, panes, window_id)
             }
         })
         .await
@@ -1999,6 +2007,7 @@ mod test {
         let local = f.local_window();
         f.inner
             .record_remote_to_local_window_mapping(OTHER_WINDOW, local);
+        f.inner.count_tab_move();
         let inner = Arc::clone(&f.inner);
 
         let first_batch = f.tab_orders_answered(None, async move {
