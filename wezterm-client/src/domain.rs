@@ -40,7 +40,8 @@ pub struct ClientInner {
     /// requests are queued for the server. A pane list shows the server's
     /// order only when every move made has been queued and none was queued
     /// after the list was asked for: the server answers one client's
-    /// requests in order, so that list reflects every move.
+    /// requests in order, so that list reflects every move. A move that
+    /// sends nothing stops counting as made, since no list can predate it.
     tab_moves: Mutex<TabMoves>,
     /// Set when a pane list's tab order was not shown because of a move
     /// made here; the order is read again once every move is queued.
@@ -164,9 +165,6 @@ impl ClientInner {
         local_window_id: WindowId,
         remote_windows: &[WindowId],
     ) -> Vec<codec::SetWindowTabOrder> {
-        if remote_windows.is_empty() {
-            return vec![];
-        }
         let mux = Mux::get();
         let tab_ids: Vec<TabId> = match mux.get_window(local_window_id) {
             Some(window) => window
@@ -242,16 +240,21 @@ impl ClientInner {
     /// the server is known to predate the request. The move counts as
     /// queued in the same poll that queues every one of its requests, which
     /// are started together so that none waits behind an answer; a pane list
-    /// asked for afterwards is behind all of them on the wire. Once answered,
-    /// a list whose order was skipped while moves were in flight is read
-    /// again.
+    /// asked for afterwards is behind all of them on the wire.
     async fn send_tab_orders(&self, local_window_id: WindowId, remote_windows: Vec<WindowId>) {
         let requests = if self.tab_order_support() == TabOrderSupport::No {
             vec![]
         } else {
             self.tab_order_requests(local_window_id, &remote_windows)
         };
-        self.tab_moves.lock().unwrap().queued += 1;
+        {
+            let mut moves = self.tab_moves.lock().unwrap();
+            if requests.is_empty() {
+                moves.made -= 1;
+            } else {
+                moves.queued += 1;
+            }
+        }
         let answers = futures::future::join_all(
             requests
                 .into_iter()
@@ -1255,11 +1258,6 @@ impl Domain for ClientDomain {
                     panes.tabs.len()
                 ));
                 ClientDomain::finish_attach(domain_id, client, panes, window_id)?;
-                // Learned now, so that a move made before the first resync is
-                // not sent to a server that predates tab orders
-                ClientDomain::get_client_inner_for_domain(domain_id)?
-                    .learn_tab_order_support()
-                    .await;
                 Ok(())
             }
         })
@@ -1297,7 +1295,7 @@ impl Domain for ClientDomain {
 mod test {
     use super::*;
     use crate::client::SentRequests;
-    use codec::{Pdu, SetWindowTabOrder, UnitResponse};
+    use codec::{ErrorResponse, Pdu, SetWindowTabOrder, UnitResponse};
     use mux::renderable::StableCursorPosition;
     use mux::tab::{PaneEntry, PaneNode, SplitDirection, SplitDirectionAndSize};
     use promise::spawn::SimpleExecutor;
@@ -1440,7 +1438,8 @@ mod test {
         }
 
         /// Run `task` with the server answering each tab order it sends, or
-        /// refusing it with `refusal`, and return the tab orders sent.
+        /// refusing it with `refusal` as a server does, in an error response,
+        /// and return the tab orders sent.
         fn tab_orders_answered(
             &self,
             refusal: Option<&str>,
@@ -1451,7 +1450,11 @@ mod test {
             promise::spawn::spawn(task).detach();
             self.run_queued();
             let sent = self.sent.answer(|pdu| match (pdu, refusal) {
-                (Pdu::SetWindowTabOrder(_), Some(refusal)) => Err(anyhow!("{refusal}")),
+                (Pdu::SetWindowTabOrder(_), Some(refusal)) => {
+                    Ok(Pdu::ErrorResponse(ErrorResponse {
+                        reason: refusal.to_string(),
+                    }))
+                }
                 _ => Ok(Pdu::UnitResponse(UnitResponse {})),
             });
             self.run_queued();
@@ -1697,6 +1700,7 @@ mod test {
         f.resync(pane_list(&[(1, &[10]), (2, &[20])]));
         let local = f.local_window();
         let move_once = || {
+            f.inner.count_tab_move();
             let inner = Arc::clone(&f.inner);
             async move { inner.send_tab_orders(local, vec![WINDOW]).await }
         };
@@ -1705,6 +1709,28 @@ mod test {
         assert_eq!(f.tab_orders_answered(refusal, move_once()).len(), 1);
         assert_eq!(f.inner.tab_order_support(), TabOrderSupport::No);
         assert_eq!(f.tab_orders_answered(refusal, move_once()), vec![]);
+    }
+
+    /// A move that sends nothing, here because its window is gone, leaves
+    /// nothing on the server for a pane list to predate, so the next list's
+    /// order is shown.
+    #[test]
+    fn a_move_that_sends_nothing_does_not_hold_back_a_list() {
+        let f = Fixture::new();
+        f.inner.set_tab_order_support(TabOrderSupport::Yes);
+        f.resync(pane_list(&[(1, &[10]), (2, &[20])]));
+        let (t1, t2) = (f.local_tab(1), f.local_tab(2));
+        let known_before_the_move = f.inner.known_remote_ids();
+        f.inner.count_tab_move();
+        let gone_window = f.local_window() + 1000;
+        let inner = Arc::clone(&f.inner);
+        let sent = f.tab_orders_answered(None, async move {
+            inner.send_tab_orders(gone_window, vec![WINDOW]).await
+        });
+        assert_eq!(sent, vec![]);
+
+        f.resync_knowing(pane_list(&[(2, &[20]), (1, &[10])]), known_before_the_move);
+        assert_eq!(f.window_tab_ids(), vec![t2, t1]);
     }
 
     /// A server that takes tab orders owns them: a tab another client added
