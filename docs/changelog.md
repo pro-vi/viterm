@@ -160,6 +160,10 @@ As features stabilize some brief notes about them will accumulate here.
   `CTRL-u` to kill back to the start of the line. Thanks to @bew! #8013
 
 #### Fixed
+* Multiplexer: a split made on the server, or a pane moved into a tab with
+  `wezterm cli split-pane --move-pane-id`, reached the other `wezterm connect`
+  clients only at their next resync for some other reason. The server now
+  announces it at once.
 * macOS: Fix window border when opacity<1 and shadow enabled.
   Thanks to @Adams-Galaxy! #8038 #5158
 * perf: Terminal images were hashed three times each on the transmit path; the sha256
