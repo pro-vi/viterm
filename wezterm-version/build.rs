@@ -13,19 +13,25 @@ fn main() {
         // Otherwise we'll derive it from the git information
 
         if let Ok(repo) = git2::Repository::discover(".") {
-            if let Ok(ref_head) = repo.find_reference("HEAD") {
-                let repo_path = repo.path().to_path_buf();
-
-                if let Ok(resolved) = ref_head.resolve() {
-                    if let Some(name) = resolved.name() {
-                        let path = repo_path.join(name);
-                        if path.exists() {
-                            println!(
-                                "cargo:rerun-if-changed={}",
-                                path.canonicalize().unwrap().display()
-                            );
-                        }
+            // HEAD changes when another branch is checked out or a detached
+            // HEAD moves, and its reflog on every commit, including one to a
+            // branch whose ref is packed. These two live in the worktree's
+            // own git directory and the branch ref in the common one; in a
+            // plain checkout the two directories are the same `.git`.
+            let mut watched = vec![repo.path().join("HEAD"), repo.path().join("logs/HEAD")];
+            if let Ok(head) = repo.head() {
+                if head.is_branch() {
+                    if let Some(name) = head.name() {
+                        watched.push(repo.commondir().join(name));
                     }
+                }
+            }
+
+            // A path that does not exist makes cargo (as of 1.94) rerun
+            // this script on every build.
+            for path in watched {
+                if let Ok(path) = path.canonicalize() {
+                    println!("cargo:rerun-if-changed={}", path.display());
                 }
             }
 
