@@ -270,11 +270,7 @@ impl ClientInner {
     /// asked for afterwards is behind all of them on the wire. Once answered,
     /// a list whose order was skipped while moves were in flight is read
     /// again.
-    async fn send_tab_orders(
-        self: &Arc<Self>,
-        local_window_id: WindowId,
-        remote_windows: Vec<WindowId>,
-    ) {
+    async fn send_tab_orders(&self, local_window_id: WindowId, remote_windows: Vec<WindowId>) {
         let requests = if self.tab_order_support() == TabOrderSupport::No {
             vec![]
         } else {
@@ -294,13 +290,16 @@ impl ClientInner {
         // order; read it again once every move is queued, so the new list is
         // behind every queued request. The server's own notice of a reorder
         // does not cover this: it sends none for a move that changed nothing
-        // or that it refused.
+        // or that it refused. The client is taken from the domain, as for
+        // every other sync, so that nothing is read once it has detached.
         let moves = self.tab_moves();
         if moves.made == moves.queued
             && std::mem::take(&mut *self.tab_order_skipped.lock().unwrap())
         {
-            if let Err(err) = ClientDomain::sync_with_server(Arc::clone(self)).await {
-                log::debug!("reading the tab order again: {err:#}");
+            if let Ok(inner) = ClientDomain::get_client_inner_for_domain(self.local_domain_id) {
+                if let Err(err) = ClientDomain::sync_with_server(inner).await {
+                    log::debug!("reading the tab order again: {err:#}");
+                }
             }
         }
     }
@@ -1507,6 +1506,27 @@ mod test {
             }
         }
 
+        /// A fixture whose client is the one a registered `ClientDomain`
+        /// holds, as after an attach.
+        fn with_domain() -> (Self, Arc<ClientDomain>) {
+            let mut f = Self::new();
+            let domain = Arc::new(ClientDomain::new(ClientDomainConfig::Unix(
+                UnixDomain::default(),
+            )));
+            let (client, sent) = Client::dummy();
+            f.inner = Arc::new(ClientInner::new(
+                domain.local_domain_id,
+                client,
+                None,
+                false,
+            ));
+            f.sent = sent;
+            domain.inner.lock().unwrap().replace(Arc::clone(&f.inner));
+            let registered: Arc<dyn Domain> = domain.clone();
+            f.mux.add_domain(&registered);
+            (f, domain)
+        }
+
         /// Apply a pane list as `sync_with_server` does.
         fn resync(&self, panes: ListPanesResponse) {
             self.resync_knowing(panes, self.inner.known_remote_ids());
@@ -1989,7 +2009,7 @@ mod test {
     /// list carried.
     #[test]
     fn a_skipped_order_is_read_again_once_the_move_is_answered() {
-        let f = Fixture::new();
+        let (f, _domain) = Fixture::with_domain();
         f.inner.set_tab_order_support(TabOrderSupport::Yes);
         f.resync(pane_list(&[(1, &[10]), (2, &[20])]));
         let (t1, t2) = (f.local_tab(1), f.local_tab(2));
@@ -2016,6 +2036,33 @@ mod test {
             .iter()
             .any(|pdu| matches!(pdu, Pdu::ListPanes(_))));
         assert_eq!(f.window_tab_ids(), vec![t2, t1]);
+    }
+
+    /// A domain that detaches while a move is in flight reads nothing once
+    /// the move is answered: its local copies are gone, and a list applied
+    /// now would bring them back.
+    #[test]
+    fn a_skipped_order_is_not_read_after_a_detach() {
+        let (f, domain) = Fixture::with_domain();
+        f.inner.set_tab_order_support(TabOrderSupport::Yes);
+        f.resync(pane_list(&[(1, &[10]), (2, &[20])]));
+        let known_before_the_move = f.inner.known_remote_ids();
+        f.inner.count_tab_move();
+        let inner = Arc::clone(&f.inner);
+        let local = f.local_window();
+        promise::spawn::spawn(async move { inner.send_tab_orders(local, vec![WINDOW]).await })
+            .detach();
+        f.run_queued();
+        f.resync_knowing(pane_list(&[(2, &[20]), (1, &[10])]), known_before_the_move);
+
+        domain.perform_detach();
+        f.sent.answer(|_| Ok(Pdu::UnitResponse(UnitResponse {})));
+        f.run_queued();
+
+        let after_the_detach = f.sent.answer(|_| Ok(Pdu::UnitResponse(UnitResponse {})));
+        assert!(!after_the_detach
+            .iter()
+            .any(|pdu| matches!(pdu, Pdu::ListPanes(_))));
     }
 
     /// A server that does not take tab orders keeps its own order. A resync
