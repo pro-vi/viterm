@@ -10,9 +10,11 @@ Asks the fancy tab bar to draw runs of adjacent tabs as one item each.
 
 A group is drawn as one item when two or more of its tabs are in this window
 and they sit next to each other in its tab order; otherwise its tabs are drawn
-as they always are. A tab named by two groups belongs to the first, and an id
-that is not in the window is ignored. The item reads the numbers of its first
-and last tabs, numbered as the tab bar numbers tabs (see
+as they always are. A tab named by two groups goes to the first of them that
+is drawn as one item, and an id that is not in the window is ignored. With the
+retro tab bar, or with the tab bar hidden, every tab is drawn as itself. The
+item reads the numbers of its first and last tabs, numbered as the tab bar
+numbers tabs (see
 [show_tab_index_in_tab_bar](../config/show_tab_index_in_tab_bar.md) and
 [tab_and_split_indices_are_zero_based](../config/tab_and_split_indices_are_zero_based.md)),
 then the label. It is drawn as a tab with layers showing past its trailing
@@ -28,8 +30,6 @@ holds, and the tab numbers do not change: key assignments such as
 Each call replaces the groups set before; an empty list removes them all. The
 groups are kept for this window only, until the window closes. Calling it again
 with the same groups does not redraw the tab bar.
-
-`window:tab_bar_fit()` counts a group's item as one tab.
 
 ```lua
 wezterm.on('update-status', function(window)

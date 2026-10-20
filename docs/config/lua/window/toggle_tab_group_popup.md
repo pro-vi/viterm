@@ -20,7 +20,8 @@ it takes the keyboard as the command palette does: a key with a key assignment
 still performs it, so `ActivateTab` reaches any tab, and other keys do nothing.
 It closes by itself when its group stops being drawn as one item.
 
-The popup is drawn only by the fancy tab bar (`use_fancy_tab_bar = true`).
+Only the fancy tab bar (`use_fancy_tab_bar = true`) draws a group as one item,
+so with the retro tab bar, or with the tab bar hidden, nothing opens.
 
 ```lua
 config.keys = {

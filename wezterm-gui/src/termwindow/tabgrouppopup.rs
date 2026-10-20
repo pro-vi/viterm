@@ -2,9 +2,13 @@
 //! the tab bar draws tabs, floating over the panes next to the group's item.
 //! The fancy tab bar lays it out while it lays out the bar
 //! (`build_fancy_tab_bar`), because the bar knows where the item is and how
-//! the style draws a tab; this modal only holds what was laid out.
+//! the style draws a tab, and hands the layout to this modal, which only
+//! draws it. The bar is painted before the modal, so a new layout is drawn in
+//! the frame that made it.
+use crate::tabbar::TabBarItem;
 use crate::termwindow::box_model::ComputedElement;
 use crate::termwindow::modal::Modal;
+use crate::termwindow::UIItemType;
 use crate::TermWindow;
 use mux::tab::TabId;
 use std::cell::{Ref, RefCell};
@@ -14,15 +18,19 @@ pub struct TabGroupPopup {
     /// A tab of the group the popup lists. Tab indices change when tabs
     /// move; the id names the group for as long as the tab is in it.
     pub tab_id: TabId,
-    element: RefCell<Option<Vec<ComputedElement>>>,
+    elements: RefCell<Vec<ComputedElement>>,
 }
 
 impl TabGroupPopup {
     pub fn new(tab_id: TabId) -> Self {
         Self {
             tab_id,
-            element: RefCell::new(None),
+            elements: RefCell::new(vec![]),
         }
+    }
+
+    pub fn set_elements(&self, elements: Vec<ComputedElement>) {
+        *self.elements.borrow_mut() = elements;
     }
 }
 
@@ -51,20 +59,39 @@ impl Modal for TabGroupPopup {
 
     fn computed_element(
         &self,
-        term_window: &mut TermWindow,
+        _term_window: &mut TermWindow,
     ) -> anyhow::Result<Ref<'_, [ComputedElement]>> {
-        if self.element.borrow().is_none() {
-            if let Some(elements) = term_window.tab_group_popup_elements.as_ref() {
-                self.element.borrow_mut().replace(elements.clone());
-            }
-        }
-        Ok(Ref::map(self.element.borrow(), |element| {
-            element.as_deref().unwrap_or(&[])
+        Ok(Ref::map(self.elements.borrow(), |elements| {
+            elements.as_slice()
         }))
     }
 
-    fn reconfigure(&self, _term_window: &mut TermWindow) {
-        self.element.borrow_mut().take();
+    /// The layout comes from the tab bar build, so this asks for the next one.
+    fn reconfigure(&self, term_window: &mut TermWindow) {
+        term_window.invalidate_fancy_tab_bar();
+    }
+}
+
+/// What a mouse press does while a popup is open, by what it lands on.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PressOnPopup {
+    /// On the popup, or on a group's item, which toggles its popup: the
+    /// press is handled as it is.
+    Keep,
+    /// Elsewhere in the tab bar: the popup closes, then the press does what
+    /// it does with no popup.
+    CloseAndAct,
+    /// Anywhere else, such as a pane: the popup closes, and the press and its
+    /// release go no further.
+    CloseOnly,
+}
+
+pub fn press_on_popup(item: Option<&UIItemType>) -> PressOnPopup {
+    match item {
+        Some(UIItemType::TabGroupPopup(_))
+        | Some(UIItemType::TabBar(TabBarItem::TabGroup { .. })) => PressOnPopup::Keep,
+        Some(UIItemType::TabBar(_)) | Some(UIItemType::CloseTab(_)) => PressOnPopup::CloseAndAct,
+        _ => PressOnPopup::CloseOnly,
     }
 }
 
@@ -93,17 +120,17 @@ pub fn popup_origin(
 
 /// Where the point under (or over) the popup goes: at the item's centre,
 /// but never past the popup's own corners.
-pub fn caret_x(
+pub fn point_x(
     item: euclid::default::Rect<f32>,
     popup_x: f32,
     popup_width: f32,
-    caret_width: f32,
+    point_width: f32,
     inset: f32,
 ) -> f32 {
     let centre = item.origin.x + item.size.width / 2.;
     let min = popup_x + inset;
-    let max = (popup_x + popup_width - inset - caret_width).max(min);
-    (centre - caret_width / 2.).clamp(min, max)
+    let max = (popup_x + popup_width - inset - point_width).max(min);
+    (centre - point_width / 2.).clamp(min, max)
 }
 
 #[cfg(test)]
@@ -176,15 +203,58 @@ mod test {
     }
 
     #[test]
+    fn a_press_on_the_popup_or_a_group_keeps_it() {
+        assert_eq!(
+            press_on_popup(Some(&UIItemType::TabGroupPopup(Some(3)))),
+            PressOnPopup::Keep
+        );
+        let group = UIItemType::TabBar(TabBarItem::TabGroup {
+            group_idx: 0,
+            active: false,
+        });
+        assert_eq!(press_on_popup(Some(&group)), PressOnPopup::Keep);
+    }
+
+    #[test]
+    fn a_press_elsewhere_in_the_tab_bar_closes_it_and_still_acts() {
+        let tab = UIItemType::TabBar(TabBarItem::Tab {
+            tab_idx: 1,
+            active: false,
+        });
+        assert_eq!(press_on_popup(Some(&tab)), PressOnPopup::CloseAndAct);
+        assert_eq!(
+            press_on_popup(Some(&UIItemType::TabBar(TabBarItem::NewTabButton))),
+            PressOnPopup::CloseAndAct
+        );
+        assert_eq!(
+            press_on_popup(Some(&UIItemType::TabBar(TabBarItem::None))),
+            PressOnPopup::CloseAndAct
+        );
+        assert_eq!(
+            press_on_popup(Some(&UIItemType::CloseTab(2))),
+            PressOnPopup::CloseAndAct
+        );
+    }
+
+    #[test]
+    fn a_press_anywhere_else_only_closes_it() {
+        assert_eq!(press_on_popup(None), PressOnPopup::CloseOnly);
+        assert_eq!(
+            press_on_popup(Some(&UIItemType::ScrollThumb)),
+            PressOnPopup::CloseOnly
+        );
+    }
+
+    #[test]
     fn the_point_aims_at_the_item_but_stays_inside_the_popup() {
         assert_eq!(
-            caret_x(rect(600., 900., 100., 30.), 500., 300., 12., 10.),
+            point_x(rect(600., 900., 100., 30.), 500., 300., 12., 10.),
             644.
         );
         assert_eq!(
-            caret_x(rect(1400., 900., 40., 30.), 1136., 300., 12., 10.),
+            point_x(rect(1400., 900., 40., 30.), 1136., 300., 12., 10.),
             1414.
         );
-        assert_eq!(caret_x(rect(0., 900., 40., 30.), 4., 300., 12., 10.), 14.);
+        assert_eq!(point_x(rect(0., 900., 40., 30.), 4., 300., 12., 10.), 14.);
     }
 }

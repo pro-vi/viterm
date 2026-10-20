@@ -63,25 +63,25 @@ pub struct FoldedTabGroup {
     pub tabs: Range<usize>,
     /// The ids of the tabs in `tabs`, which name the group while tabs move.
     pub ids: Vec<TabId>,
-    pub label: String,
     pub titles: Vec<Line>,
 }
 
 impl FoldedTabGroup {
-    /// The group's tabs as entries the tab bar's element code draws, the
-    /// active tab marked active.
-    pub fn entries(&self, active_tab: Option<usize>) -> Vec<TabEntry> {
+    /// The group's tabs as (tab index, active, entry the tab bar's element
+    /// code draws).
+    pub fn entries(&self, active_tab: Option<usize>) -> Vec<(usize, bool, TabEntry)> {
         self.tabs
             .clone()
             .zip(self.titles.iter())
-            .map(|(tab_idx, title)| TabEntry {
-                item: TabBarItem::Tab {
-                    tab_idx,
-                    active: Some(tab_idx) == active_tab,
-                },
-                title: title.clone(),
-                x: 0,
-                width: title.len(),
+            .map(|(tab_idx, title)| {
+                let active = Some(tab_idx) == active_tab;
+                let entry = TabEntry {
+                    item: TabBarItem::Tab { tab_idx, active },
+                    title: title.clone(),
+                    x: 0,
+                    width: title.len(),
+                };
+                (tab_idx, active, entry)
             })
             .collect()
     }
@@ -89,8 +89,8 @@ impl FoldedTabGroup {
 
 /// The groups that fold, as (index into `groups`, range of tab indices), in
 /// tab order. A group folds when it names two or more of the tabs in
-/// `tab_ids`, the window's tabs in order, and they are contiguous. A tab
-/// named by an earlier group is not taken again; an id not in the window is
+/// `tab_ids`, the window's tabs in order, and they are contiguous. A tab an
+/// earlier folded group took is not taken again; an id not in the window is
 /// ignored.
 pub fn folded_ranges(groups: &[TabGroupSpec], tab_ids: &[TabId]) -> Vec<(usize, Range<usize>)> {
     let mut taken = vec![false; tab_ids.len()];
@@ -424,6 +424,11 @@ impl TabBarState {
         &self.folded
     }
 
+    /// The index of the folded group holding tab `tab_id`, if one does.
+    pub fn folded_group_of(&self, tab_id: TabId) -> Option<usize> {
+        self.folded.iter().position(|g| g.ids.contains(&tab_id))
+    }
+
     pub fn line(&self) -> &Line {
         &self.line
     }
@@ -718,7 +723,6 @@ impl TabBarState {
                 folded.push(FoldedTabGroup {
                     tabs: range.clone(),
                     ids: tab_ids[range.clone()].to_vec(),
-                    label: groups[group_idx].label.clone(),
                     titles,
                 });
                 line.append_line(group_line, SEQ_ZERO);
@@ -1080,17 +1084,14 @@ mod test {
     #[test]
     fn a_group_reads_its_first_and_last_tab_numbers() {
         assert_eq!(
-            tab_group_text(&(1..4), "philemon", true, false),
-            " 2\u{2013}4: philemon "
+            tab_group_text(&(1..4), "work", true, false),
+            " 2\u{2013}4: work "
         );
         assert_eq!(
-            tab_group_text(&(1..4), "philemon", true, true),
-            " 1\u{2013}3: philemon "
+            tab_group_text(&(1..4), "work", true, true),
+            " 1\u{2013}3: work "
         );
-        assert_eq!(
-            tab_group_text(&(1..4), "philemon", false, false),
-            " philemon "
-        );
+        assert_eq!(tab_group_text(&(1..4), "work", false, false), " work ");
     }
 
     #[test]
@@ -1109,7 +1110,7 @@ mod test {
             &config,
             "",
             "",
-            &[spec(&[11, 12, 13], "philemon")],
+            &[spec(&[11, 12, 13], "work")],
         );
         let kinds: Vec<TabBarItem> = bar
             .items()
@@ -1147,7 +1148,7 @@ mod test {
             .find(|e| matches!(e.item, TabBarItem::TabGroup { .. }))
             .map(|e| e.title.as_str().to_string())
             .unwrap();
-        assert_eq!(text, " 2\u{2013}4: philemon ");
+        assert_eq!(text, " 2\u{2013}4: work ");
     }
 
     #[test]

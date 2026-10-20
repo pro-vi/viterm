@@ -643,14 +643,9 @@ impl crate::TermWindow {
                 TabBarItem::Tab { .. } | TabBarItem::TabGroup { .. } => {
                     let (tab_idx, active, is_group) = match item.item {
                         TabBarItem::Tab { tab_idx, active } => (tab_idx, active, false),
-                        TabBarItem::TabGroup { group_idx, active } => {
-                            let first = self
-                                .tab_bar
-                                .folded()
-                                .get(group_idx)
-                                .map_or(0, |group| group.tabs.start);
-                            (first, active, true)
-                        }
+                        // A group's tab index would only number a close
+                        // button, which a group does not have.
+                        TabBarItem::TabGroup { active, .. } => (0, active, true),
                         _ => unreachable!(),
                     };
                     let mut elem = item_to_elem(item);
@@ -771,12 +766,8 @@ impl crate::TermWindow {
         // The open popup: the group's tabs, drawn by the same element code as
         // the bar's tabs, in a box of the bar's color with the style's
         // corners, next to the group's item, with a point aimed at it.
-        let open_group = self.open_tab_group_popup().and_then(|open| {
-            let group_idx = self
-                .tab_bar
-                .folded()
-                .iter()
-                .position(|g| g.ids.contains(&open))?;
+        let open_group = self.open_popup_tab().and_then(|open| {
+            let group_idx = self.tab_bar.folded_group_of(open)?;
             let anchor = computed.ui_items().into_iter().find(|item| {
                 matches!(item.item_type,
                     UIItemType::TabBar(TabBarItem::TabGroup { group_idx: g, .. }) if g == group_idx)
@@ -790,11 +781,7 @@ impl crate::TermWindow {
                     .get_window(self.mux_window_id)
                     .map(|window| window.get_active_tab_idx());
                 let mut entries = vec![];
-                for entry in group.entries(active_tab) {
-                    let (tab_idx, active) = match entry.item {
-                        TabBarItem::Tab { tab_idx, active } => (tab_idx, active),
-                        _ => continue,
-                    };
+                for (tab_idx, active, entry) in group.entries(active_tab) {
                     let mut elem = item_to_elem(&entry);
                     if active {
                         elem = look.mark(elem, &font, marker_color);
@@ -874,7 +861,7 @@ impl crate::TermWindow {
                     text: edge.into(),
                 });
                 let mut point = self.compute_element(&popup_context, &point)?;
-                let point_x = tabgrouppopup::caret_x(
+                let point_x = tabgrouppopup::point_x(
                     item,
                     origin.x,
                     boxed.bounds.width(),

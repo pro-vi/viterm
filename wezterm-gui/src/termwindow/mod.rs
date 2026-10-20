@@ -405,8 +405,8 @@ pub struct TermWindow {
     pub left_status: String,
     /// The groups `window:set_tab_groups` asked the tab bar to fold.
     tab_groups: Vec<crate::tabbar::TabGroupSpec>,
-    /// The open tab group popup as the last fancy tab bar build laid it out.
-    pub tab_group_popup_elements: Option<Vec<box_model::ComputedElement>>,
+    /// The press that closed a tab group popup, whose release is dropped too.
+    popup_dismiss_press: Option<MousePress>,
     last_ui_item: Option<UIItem>,
     /// Tracks whether the current mouse-down event is part of click-focus.
     /// If so, we ignore mouse events until released
@@ -546,6 +546,7 @@ impl TermWindow {
             self.last_mouse_click = None;
             self.current_mouse_buttons.clear();
             self.current_mouse_capture = None;
+            self.popup_dismiss_press = None;
             self.is_click_to_focus_window = false;
 
             for state in self.pane_state.borrow_mut().values_mut() {
@@ -730,7 +731,7 @@ impl TermWindow {
             right_status: String::new(),
             left_status: String::new(),
             tab_groups: vec![],
-            tab_group_popup_elements: None,
+            popup_dismiss_press: None,
             last_mouse_coords: (0, -1),
             window_drag_position: None,
             current_mouse_event: None,
@@ -1883,7 +1884,7 @@ impl TermWindow {
     }
 
     /// A tab of the group whose popup is open, if one is.
-    fn open_tab_group_popup(&self) -> Option<mux::tab::TabId> {
+    fn open_popup_tab(&self) -> Option<mux::tab::TabId> {
         self.get_modal().and_then(|modal| {
             modal
                 .downcast_ref::<tabgrouppopup::TabGroupPopup>()
@@ -1899,23 +1900,36 @@ impl TermWindow {
             None => return,
         };
         if self
-            .open_tab_group_popup()
+            .open_popup_tab()
             .map_or(false, |open| ids.contains(&open))
         {
             self.close_tab_group_popup();
             return;
         }
         if let Some(&tab_id) = ids.first() {
-            self.tab_group_popup_elements = None;
             self.set_modal(Rc::new(tabgrouppopup::TabGroupPopup::new(tab_id)));
             self.invalidate_fancy_tab_bar();
         }
     }
 
     pub fn close_tab_group_popup(&mut self) {
-        if self.open_tab_group_popup().is_some() {
+        if self.open_popup_tab().is_some() {
             self.cancel_modal();
-            self.tab_group_popup_elements = None;
+        }
+    }
+
+    /// Hands the open popup what a tab bar build laid out for it, or closes
+    /// it when the build found nothing to lay out.
+    pub fn set_tab_group_popup_layout(&mut self, layout: Option<Vec<box_model::ComputedElement>>) {
+        let Some(modal) = self.get_modal() else {
+            return;
+        };
+        let Some(popup) = modal.downcast_ref::<tabgrouppopup::TabGroupPopup>() else {
+            return;
+        };
+        match layout {
+            Some(elements) => popup.set_elements(elements),
+            None => self.cancel_modal(),
         }
     }
 
@@ -1923,7 +1937,7 @@ impl TermWindow {
     /// open, else opens the popup of the folded group holding the active tab.
     /// False when no popup was open and the active tab is in no folded group.
     fn toggle_tab_group_popup_for_active_tab(&mut self) -> bool {
-        if self.open_tab_group_popup().is_some() {
+        if self.open_popup_tab().is_some() {
             self.close_tab_group_popup();
             return true;
         }
@@ -2089,7 +2103,13 @@ impl TermWindow {
             &self.config,
             &self.left_status,
             &self.right_status,
-            &self.tab_groups,
+            // Only the fancy tab bar draws a group as one item and opens its
+            // popup; with the retro tab bar, or none, every tab is drawn.
+            if self.config.use_fancy_tab_bar && self.config.enable_tab_bar {
+                &self.tab_groups
+            } else {
+                &[]
+            },
         );
         if new_tab_bar != self.tab_bar {
             self.tab_bar = new_tab_bar;
@@ -2101,8 +2121,8 @@ impl TermWindow {
         }
         // A popup lists one group's tabs; it closes once that group no longer
         // folds.
-        if let Some(open) = self.open_tab_group_popup() {
-            if !self.tab_bar.folded().iter().any(|g| g.ids.contains(&open)) {
+        if let Some(open) = self.open_popup_tab() {
+            if self.tab_bar.folded_group_of(open).is_none() {
                 self.close_tab_group_popup();
             }
         }
