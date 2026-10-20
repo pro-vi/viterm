@@ -682,8 +682,8 @@ fn mux_notify_client_domain(local_domain_id: DomainId, notif: MuxNotification) -
                 let remote_windows = inner.remote_windows_of(window_id);
                 if !remote_windows.is_empty() {
                     inner.count_tab_move();
-                    // Defer: Mux::get_window may hit a borrow error if called
-                    // now, as for WindowWorkspaceChanged above
+                    // Deferred, since sending awaits the server's answers and
+                    // a mux subscriber returns at once
                     promise::spawn::spawn_into_main_thread(async move {
                         inner.send_tab_orders(window_id, remote_windows).await;
                     })
@@ -1918,6 +1918,24 @@ mod test {
         assert_eq!(sent, vec![]);
 
         f.resync_knowing(pane_list(&[(2, &[20]), (1, &[10])]), known_before_the_move);
+        assert_eq!(f.window_tab_ids(), vec![t2, t1]);
+    }
+
+    /// A move is counted by the handler of its notification, before the
+    /// send is deferred, so a pane list asked for earlier and applied before
+    /// the send runs keeps the move.
+    #[test]
+    fn a_move_is_counted_before_its_send_is_deferred() {
+        let (f, _domain) = Fixture::with_domain();
+        f.inner.set_tab_order_support(TabOrderSupport::Yes);
+        f.resync(pane_list(&[(1, &[10]), (2, &[20])]));
+        let (t1, t2) = (f.local_tab(1), f.local_tab(2));
+        let known_before_the_move = f.inner.known_remote_ids();
+        f.move_tabs_locally(&[t2, t1]);
+        f.mux
+            .notify(MuxNotification::WindowTabOrderChanged(f.local_window()));
+
+        f.resync_knowing(pane_list(&[(1, &[10]), (2, &[20])]), known_before_the_move);
         assert_eq!(f.window_tab_ids(), vec![t2, t1]);
     }
 
