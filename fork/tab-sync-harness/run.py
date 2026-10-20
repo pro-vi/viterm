@@ -277,11 +277,17 @@ def order(h):
     h.cli("set-tab-title", "--tab-id", str(e_tab), "E")
     h.check("the moving GUI shows the spawned tab", h.wait_for_gui_tabs(5, mover))
     time.sleep(2)
-    seen_by_mover = h.gui_rows(mover)
+    server, seen_by_mover, seen_by_watcher = h.server_rows(), h.gui_rows(mover), h.gui_rows(watcher)
+    h.save("server-after-spawn", server)
     h.save("mover-after-spawn", seen_by_mover)
+    h.save("watcher-after-spawn", seen_by_watcher)
     moved = moved + ["E"]
     h.check("after a resync the moving GUI still shows its move",
             titles_in_order(seen_by_mover) == moved, str(titles_in_order(seen_by_mover)))
+    h.check("after a resync the server keeps the new order", titles_in_order(server) == moved,
+            str(titles_in_order(server)))
+    h.check("after a resync the other GUI shows the new order", titles_in_order(seen_by_watcher) == moved,
+            str(titles_in_order(seen_by_watcher)))
 
     h.detach(mover)
     h.detach(watcher)
