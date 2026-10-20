@@ -1074,8 +1074,8 @@ impl SentRequests {
 }
 
 impl Client {
-    /// A client with no connection: nothing answers its requests, and each
-    /// one it sends can be read back from the returned `SentRequests`.
+    /// A client with no connection: no server answers its requests; the
+    /// returned `SentRequests` reads each one back and can answer it.
     #[cfg(test)]
     pub(crate) fn dummy() -> (Self, SentRequests) {
         let (sender, receiver) = unbounded();
