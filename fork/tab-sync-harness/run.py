@@ -62,6 +62,7 @@ class Harness:
         self.env["PROBE_SOCK"] = self.sock
         self.failures = []
         self.guis = []
+        self.started = 0
         self.server = subprocess.Popen(
             [os.path.join(srv_dir, "wezterm-mux-server"), "--config-file", CONFIG],
             stdout=open(os.path.join(run, "server.log"), "w"), stderr=subprocess.STDOUT, env=self.env)
@@ -89,11 +90,15 @@ class Harness:
     def attach(self, extra_env=None, gui_bin=None):
         """Start a GUI; the latest one is what gui_rows and wait_for_gui_tabs
         read unless they are given another."""
-        log = open(os.path.join(self.run, f"gui-{len(self.guis)}.log"), "w")
+        # Named by how many GUIs this run started, so a GUI attached after
+        # others detached does not overwrite their logs.
+        log = open(os.path.join(self.run, f"gui-{self.started}.log"), "w")
+        self.started += 1
         gui = subprocess.Popen(
             [gui_bin or self.gui_bin, "--config-file", CONFIG, "connect", "probe"],
             stdout=log, stderr=subprocess.STDOUT, env={**self.env, **(extra_env or {})})
         gui.sock = os.path.expanduser(f"~/.local/share/wezterm/gui-sock-{gui.pid}")
+        gui.log = log.name
         self.guis.append(gui)
         return gui
 
@@ -288,6 +293,12 @@ def order(h):
             str(titles_in_order(server)))
     h.check("after a resync the other GUI shows the new order", titles_in_order(seen_by_watcher) == moved,
             str(titles_in_order(seen_by_watcher)))
+    # A GUI that predates tab orders shows the old order, but it must stay
+    # attached: it still lists the spawned tab, and logs no lost connection.
+    h.check("the other GUI is still attached: it lists the spawned tab",
+            h.wait_for_gui_tabs(5, watcher, timeout=5))
+    lost = [line for line in open(watcher.log) if "process_unilateral" in line or "reconnect" in line.lower()]
+    h.check("the other GUI's log has no lost connection", not lost, lost[0].strip()[:160] if lost else "")
 
     h.detach(mover)
     h.detach(watcher)
