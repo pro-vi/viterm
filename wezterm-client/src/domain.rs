@@ -2011,7 +2011,7 @@ mod test {
     }
 
     /// A move made while the server is known to predate tab orders sends
-    /// nothing but still counts as queued, so the server's order is shown
+    /// nothing and stops counting as made, so the server's order is shown
     /// again once a later connection learns the server takes it.
     #[test]
     fn a_move_not_sent_to_an_older_server_does_not_stop_its_order_later() {
