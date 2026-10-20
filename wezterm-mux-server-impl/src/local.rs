@@ -73,6 +73,18 @@ fn safely_create_sock_path(unix_dom: &UnixDomain) -> anyhow::Result<UnixListener
         }
     }
 
+    // Removing the socket of a server that is still running would leave
+    // it running, with all of its panes, where no new client can reach it.
+    #[cfg(unix)]
+    if is_listening(sock_path)
+        .with_context(|| format!("checking whether {} is in use", sock_path.display()))?
+    {
+        anyhow::bail!(
+            "{} is in use by another server; not replacing it",
+            sock_path.display()
+        );
+    }
+
     // We want to remove the socket if it exists.
     // However, on windows, we can't tell if the unix domain socket
     // exists using the methods on Path, so instead we just unconditionally
@@ -91,4 +103,60 @@ fn safely_create_sock_path(unix_dom: &UnixDomain) -> anyhow::Result<UnixListener
     config::set_sticky_bit(&sock_path);
 
     Ok(listener)
+}
+
+/// Whether something accepts connections on the socket at `path`.
+/// An error means the probe could not be made at all, in which case
+/// binding the path would fail too.
+/// The connect does not block, so a server whose backlog is full cannot
+/// stall the caller. A connection the system has not refused counts as
+/// listening: Linux reports a full backlog as `EAGAIN` (connect(2)).
+/// macOS (checked on 26.7) refuses it as it does for a socket file nobody
+/// listens on, so there a server with a full backlog is taken for a stale
+/// socket and replaced.
+#[cfg(unix)]
+fn is_listening(path: &std::path::Path) -> std::io::Result<bool> {
+    use socket2::{Domain, SockAddr, Socket, Type};
+
+    let addr = SockAddr::unix(path)?;
+    let socket = Socket::new(Domain::UNIX, Type::STREAM, None)?;
+    socket.set_nonblocking(true)?;
+    Ok(match socket.connect(&addr) {
+        Ok(()) => true,
+        Err(err) => matches!(
+            err.raw_os_error(),
+            Some(libc::EAGAIN) | Some(libc::EINPROGRESS)
+        ),
+    })
+}
+
+#[cfg(all(test, unix))]
+mod test {
+    use super::*;
+
+    #[test]
+    fn a_second_server_leaves_a_live_socket_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let dom = UnixDomain {
+            socket_path: Some(dir.path().join("sock")),
+            ..UnixDomain::default()
+        };
+        let path = dom.socket_path();
+
+        let first = safely_create_sock_path(&dom).unwrap();
+        let err = safely_create_sock_path(&dom)
+            .err()
+            .expect("a second server took the path");
+        assert!(err.to_string().contains("in use"), "{err:#}");
+
+        // The path still reaches the first listener.
+        let _client = wezterm_uds::UnixStream::connect(&path).unwrap();
+        first.accept().unwrap();
+
+        // Once nothing listens, the file left behind is stale and is
+        // replaced.
+        drop(first);
+        assert!(path.exists());
+        let _second = safely_create_sock_path(&dom).unwrap();
+    }
 }

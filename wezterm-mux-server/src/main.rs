@@ -309,8 +309,15 @@ mod ossl;
 
 pub fn spawn_listener() -> anyhow::Result<()> {
     let config = configuration();
+    let mut listening = std::collections::HashSet::new();
     for unix_dom in &config.unix_domains {
-        std::env::set_var("WEZTERM_UNIX_SOCKET", unix_dom.socket_path());
+        let sock_path = unix_dom.socket_path();
+        std::env::set_var("WEZTERM_UNIX_SOCKET", &sock_path);
+        // Domains that name the same socket share its listener; a second
+        // listener would find the first one there and refuse to start.
+        if !listening.insert(sock_path) {
+            continue;
+        }
         let mut listener = wezterm_mux_server_impl::local::LocalListener::with_domain(unix_dom)?;
         thread::spawn(move || {
             listener.run();

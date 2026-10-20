@@ -7254,6 +7254,8 @@ dependencies = [
  "rangeset",
  "rcgen",
  "smol",
+ "socket2 0.5.10",
+ "tempfile",
  "termwiz",
  "url",
  "wezterm-client",
