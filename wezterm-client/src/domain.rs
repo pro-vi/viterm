@@ -67,6 +67,9 @@ pub struct ClientInner {
     /// after the list was asked for: the server answers one client's
     /// requests in order, so that list reflects every move.
     tab_moves: Mutex<TabMoves>,
+    /// Set when a pane list's tab order was not shown because of a move
+    /// made here; the order is read again once every move is queued.
+    tab_order_skipped: Mutex<bool>,
     pub focused_remote_pane_id: Mutex<Option<PaneId>>,
 }
 
@@ -264,8 +267,14 @@ impl ClientInner {
     /// the server is known to predate the request. The move counts as
     /// queued in the same poll that queues every one of its requests, which
     /// are started together so that none waits behind an answer; a pane list
-    /// asked for afterwards is behind all of them on the wire.
-    async fn send_tab_orders(&self, local_window_id: WindowId, remote_windows: Vec<WindowId>) {
+    /// asked for afterwards is behind all of them on the wire. Once answered,
+    /// a list whose order was skipped while moves were in flight is read
+    /// again.
+    async fn send_tab_orders(
+        self: &Arc<Self>,
+        local_window_id: WindowId,
+        remote_windows: Vec<WindowId>,
+    ) {
         let requests = if self.tab_order_support() == TabOrderSupport::No {
             vec![]
         } else {
@@ -280,6 +289,19 @@ impl ClientInner {
         .await;
         for err in answers.into_iter().filter_map(Result::err) {
             self.note_tab_order_refusal(&err);
+        }
+        // A list read while moves were in flight did not show the server's
+        // order; read it again once every move is queued, so the new list is
+        // behind every queued request. The server's own notice of a reorder
+        // does not cover this: it sends none for a move that changed nothing
+        // or that it refused.
+        let moves = self.tab_moves();
+        if moves.made == moves.queued
+            && std::mem::take(&mut *self.tab_order_skipped.lock().unwrap())
+        {
+            if let Err(err) = ClientDomain::sync_with_server(Arc::clone(self)).await {
+                log::debug!("reading the tab order again: {err:#}");
+            }
         }
     }
 
@@ -454,6 +476,7 @@ impl ClientInner {
             remote_to_local_pane: Mutex::new(HashMap::new()),
             tab_order_support: Mutex::new(TabOrderSupport::Unknown),
             tab_moves: Mutex::new(TabMoves::default()),
+            tab_order_skipped: Mutex::new(false),
             focused_remote_pane_id: Mutex::new(None),
         }
     }
@@ -984,22 +1007,26 @@ impl ClientDomain {
         // was asked for, which then predates it. A server that does not, or
         // one not asked yet, keeps its own order, so a move made here stays
         // as it is. Applied without WindowTabOrderChanged, which would send
-        // the order back.
+        // the order back. A skipped order is recorded, and `send_tab_orders`
+        // reads it again.
         let moves = inner.tab_moves();
-        if inner.tab_order_support() == TabOrderSupport::Yes
-            && moves.made == moves.queued
-            && moves.queued == tab_moves_queued
-        {
-            for (remote_window_id, order) in tab_order {
-                if let Some(local_window_id) = inner.remote_to_local_window(remote_window_id) {
-                    let local: Vec<TabId> = order
-                        .iter()
-                        .filter_map(|remote_tab_id| inner.remote_to_local_tab_id(*remote_tab_id))
-                        .collect();
-                    if let Some(mut window) = mux.get_window_mut(local_window_id) {
-                        window.set_tab_order(&local);
+        if inner.tab_order_support() == TabOrderSupport::Yes {
+            if moves.made == moves.queued && moves.queued == tab_moves_queued {
+                for (remote_window_id, order) in tab_order {
+                    if let Some(local_window_id) = inner.remote_to_local_window(remote_window_id) {
+                        let local: Vec<TabId> = order
+                            .iter()
+                            .filter_map(|remote_tab_id| {
+                                inner.remote_to_local_tab_id(*remote_tab_id)
+                            })
+                            .collect();
+                        if let Some(mut window) = mux.get_window_mut(local_window_id) {
+                            window.set_tab_order(&local);
+                        }
                     }
                 }
+            } else {
+                *inner.tab_order_skipped.lock().unwrap() = true;
             }
         }
 
@@ -1954,6 +1981,41 @@ mod test {
         f.resync(pane_list(&[(1, &[10]), (2, &[20])]));
 
         assert_eq!(f.window_tab_ids(), vec![t1, t2]);
+    }
+
+    /// A list whose tab order is not shown because a move made here is in
+    /// flight is followed, once that move is answered, by a fresh list,
+    /// whose order is shown: here another client's move, which the skipped
+    /// list carried.
+    #[test]
+    fn a_skipped_order_is_read_again_once_the_move_is_answered() {
+        let f = Fixture::new();
+        f.inner.set_tab_order_support(TabOrderSupport::Yes);
+        f.resync(pane_list(&[(1, &[10]), (2, &[20])]));
+        let (t1, t2) = (f.local_tab(1), f.local_tab(2));
+        let known_before_the_move = f.inner.known_remote_ids();
+        f.inner.count_tab_move();
+        let inner = Arc::clone(&f.inner);
+        let local = f.local_window();
+        promise::spawn::spawn(async move { inner.send_tab_orders(local, vec![WINDOW]).await })
+            .detach();
+        f.run_queued();
+
+        f.resync_knowing(pane_list(&[(2, &[20]), (1, &[10])]), known_before_the_move);
+        assert_eq!(f.window_tab_ids(), vec![t1, t2]);
+
+        f.sent.answer(|_| Ok(Pdu::UnitResponse(UnitResponse {})));
+        f.run_queued();
+        let read_again = f.sent.answer(|pdu| match pdu {
+            Pdu::ListPanes(_) => Ok(Pdu::ListPanesResponse(pane_list(&[(2, &[20]), (1, &[10])]))),
+            _ => Ok(Pdu::UnitResponse(UnitResponse {})),
+        });
+        f.run_queued();
+
+        assert!(read_again
+            .iter()
+            .any(|pdu| matches!(pdu, Pdu::ListPanes(_))));
+        assert_eq!(f.window_tab_ids(), vec![t2, t1]);
     }
 
     /// A server that does not take tab orders keeps its own order. A resync
