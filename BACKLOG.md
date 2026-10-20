@@ -103,6 +103,13 @@ Named `tabbar-title-memo` until 2026-10-02; plans written before then use that n
 - needs: `unit/tab-groups` (base). Plan `docs/plans/2026-10-20-001-feat-tab-groups-plan.md` U11.
 - why: When a folded group opens or closes, or a tab moves into its group, the drawn boxes jump between layouts. Keeping each item's previous rect by key and easing to the new one over about half a second, with frames scheduled through `update_next_frame_time` (the spinner's path), would show the move without any Lua during it; with the window unfocused the final layout is drawn at once. `colorease.rs` has curves; nothing eases a position yet.
 
+### `tab-groups-live-check`
+
+- side: gui
+- state: proposed
+- needs: `unit/tab-groups`, `unit/mux-window-set-tab-order`; bootstrap's `configs/wezterm/tab_groups.lua` driver.
+- why: Nothing re-runs the tab groups on an engine. Bootstrap's CI checks the driver on fake window objects only, and its GUI lane runs stock wezterm, which has no `set_tab_groups`. A case in `fork/tab-sync-harness` (or beside it) on a throwaway mux and GUI would open tabs across projects from a checkout map, assert that each project's tabs are contiguous in the server's order and that `tab_bar_fit` counts each folded group as one item, toggle the popup with `window:toggle_tab_group_popup()`, restart the GUI on an edited saved order while tabs arrive over several ticks, and run once more against an engine without the methods to see nothing change. The same steps were run by hand on engine 20261020-072440-1f588a65 against a mux of the same build and one of 20261018-200420-656e4f47. Signal: none: no job runs the tab groups on an engine. Promote when the next change to the driver or to the engine's tab group code is made.
+
 ## Deferred
 
 Decided against for the current topology (one GUI on `human-main`). Not retired; the row returns to Open if the need does.
