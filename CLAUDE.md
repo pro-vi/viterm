@@ -148,6 +148,8 @@ bash ci/deploy.sh                            # packages WezTerm-macos-<tag>/WezT
 e=~/.local/opt/viterm-engine.app
 old=$("$e/Contents/MacOS/wezterm" --version | awk '{print $2}')
 cp -R WezTerm-macos-<tag>/WezTerm.app "$e.new" &&
+  codesign --force --deep --sign uttr-dev "$e.new" &&
+  codesign --verify --strict --deep "$e.new" &&
   mv "$e" "$e.prev-$old" &&
   mv "$e.new" "$e" &&
   rm -rf WezTerm-macos-<tag> WezTerm-macos-<tag>.zip
@@ -172,6 +174,22 @@ except a copy that a running process still uses: a GUI or mux server keeps
 running the bundle it started from, and `lsof -c wezterm | grep -F .app.prev-`
 lists it under its new name (checked on macOS 26.7.1, 2026-10-19). Never keep a
 copy under `target/`, which `cargo clean` deletes.
+
+The engine is signed with the fixed local identity `uttr-dev` (a self-signed
+code-signing certificate in the login keychain, the one uttr's
+`scripts/bundle.sh` also signs with; `security find-identity -v -p codesigning`
+lists it) before it takes the engine's name. `ci/deploy.sh` leaves the bundle
+ad-hoc signed, and an ad-hoc signature's designated requirement is the hash of
+that exact binary (`codesign -d -r-` prints `cdhash H"…"`), so each install
+would change the requirement and macOS privacy grants would stop matching.
+macOS holds the engine's `wezterm-gui` responsible for a program in a pane, so
+that program would be asked again for the microphone and denied screen
+recording. Signed with the identity, the requirement is
+`identifier "com.github.wez.wezterm" and certificate leaf = H"…"`, which stays
+the same from one install to the next (checked on macOS 26.7.1, 2026-10-19).
+If the identity is missing, the install stops at `codesign` and the old engine
+stays in place. Then stop and ask the owner: signing ad-hoc or with a new
+certificate changes the requirement and resets every grant.
 
 Anything a unit adds that the config must ask for — a new config option, a new
 Lua method — is passed by those launchers as `--config name=value`, or written
