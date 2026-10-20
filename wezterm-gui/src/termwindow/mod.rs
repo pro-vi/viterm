@@ -436,6 +436,8 @@ pub struct TermWindow {
     line_quad_cache: RefCell<LfuCache<LineQuadCacheKey, LineQuadCacheValue>>,
 
     last_status_call: Instant,
+    /// schedule_title_update has an update waiting; update_title clears it.
+    title_update_pending: bool,
     cursor_blink_state: RefCell<ColorEase>,
     blink_state: RefCell<ColorEase>,
     rapid_blink_state: RefCell<ColorEase>,
@@ -759,6 +761,7 @@ impl TermWindow {
                 &config,
             )),
             last_status_call: Instant::now(),
+            title_update_pending: false,
             cursor_blink_state: RefCell::new(ColorEase::new(
                 config.cursor_blink_rate,
                 config.cursor_blink_ease_in,
@@ -1217,7 +1220,7 @@ impl TermWindow {
                         | Alert::Progress(_),
                     ..
                 } => {
-                    self.update_title();
+                    self.schedule_title_update();
                 }
                 MuxNotification::Alert {
                     alert: Alert::PaletteChanged,
@@ -1895,8 +1898,35 @@ impl TermWindow {
     /// Let's also trigger the status event so that it can choose
     /// to update the right-status.
     fn update_title(&mut self) {
+        self.title_update_pending = false;
         self.schedule_status_update();
         self.update_title_impl();
+    }
+
+    /// Like update_title, for notifications that arrive several at a time:
+    /// a title set with OSC 0 raises a window title alert, an icon title
+    /// alert and a change of the mux window's title, and over a mux
+    /// connection they reach this window in separate turns of the event
+    /// loop. A rebuilt tab bar is only seen at the next paint, so those
+    /// that arrive within one frame share one update, rather than each
+    /// rebuilding the tab bar.
+    fn schedule_title_update(&mut self) {
+        if self.title_update_pending {
+            return;
+        }
+        if let Some(window) = self.window.clone() {
+            self.title_update_pending = true;
+            let frame = Duration::from_millis(1000 / self.config.max_fps);
+            promise::spawn::spawn(async move {
+                Timer::after(frame).await;
+                window.notify(TermWindowNotif::Apply(Box::new(|term_window| {
+                    if term_window.title_update_pending {
+                        term_window.update_title();
+                    }
+                })));
+            })
+            .detach();
+        }
     }
 
     fn window_contains_pane(&mut self, pane_id: PaneId) -> bool {
