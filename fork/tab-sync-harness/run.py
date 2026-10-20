@@ -30,7 +30,11 @@ its HOME live in it, so not even a config that fails to load reaches the
 socket of a live session.
 server-dir holds the wezterm-mux-server and wezterm (CLI) binaries to use.
 The GUI window appears on screen while a run is going. Prints PASS or FAIL
-per check and exits 1 on any failure.
+per check and exits 1 on any failure. The checks after a split or a move read
+the GUIs once, after a fixed wait (3 s in ghost, 6 s in order), since some of
+them assert that a move is not undone; on a loaded machine a late answer
+therefore reads as FAIL, and each GUI's log, with timestamps, shows when the
+move and the resyncs happened.
 """
 import collections, json, os, pathlib, re, subprocess, sys, time
 
@@ -181,10 +185,12 @@ def tabs_per_window(rows):
 
 
 def first_pane(h):
-    """The server's first pane; one is spawned if the server started empty."""
+    """The server's first pane, which the server spawns itself shortly after
+    its socket appears."""
+    deadline = time.monotonic() + 10
     rows = h.server_rows()
-    if not rows:
-        h.cli("spawn", "--new-window")
+    while not rows and time.monotonic() < deadline:
+        time.sleep(0.1)
         rows = h.server_rows()
     return rows[0]
 
