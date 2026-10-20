@@ -43,13 +43,13 @@ pub(crate) fn is_applying_pane_list() -> bool {
 }
 
 /// What a client knew before it asked the server for its pane list: the
-/// remote ids it had copies of, and how many tab moves had been made.
+/// remote ids it had copies of, and how many tab moves it had queued.
 #[derive(Default)]
 struct KnownRemoteIds {
     windows: HashSet<WindowId>,
     tabs: HashSet<TabId>,
     panes: HashSet<PaneId>,
-    tab_moves: u64,
+    tab_moves_queued: u64,
 }
 
 pub struct ClientInner {
@@ -61,12 +61,19 @@ pub struct ClientInner {
     remote_to_local_tab: Mutex<HashMap<TabId, TabId>>,
     remote_to_local_pane: Mutex<HashMap<PaneId, PaneId>>,
     tab_order_support: Mutex<TabOrderSupport>,
-    /// How many tab moves have been made in this client's windows. A pane
-    /// list asked for before the count last moved may predate a move, since
-    /// the server answers one client's requests in order, so its tab order
-    /// is not applied.
-    tab_moves: Mutex<u64>,
+    /// The tab moves made in this client's windows, and those whose
+    /// requests are queued for the server. A pane list shows the server's
+    /// order only when every move made has been queued and none was queued
+    /// after the list was asked for: the server answers one client's
+    /// requests in order, so that list reflects every move.
+    tab_moves: Mutex<TabMoves>,
     pub focused_remote_pane_id: Mutex<Option<PaneId>>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct TabMoves {
+    made: u64,
+    queued: u64,
 }
 
 /// Whether the server takes `SetWindowTabOrder`, which a client learns once
@@ -242,7 +249,7 @@ impl ClientInner {
         }
     }
 
-    fn tab_moves(&self) -> u64 {
+    fn tab_moves(&self) -> TabMoves {
         *self.tab_moves.lock().unwrap()
     }
 
@@ -250,19 +257,29 @@ impl ClientInner {
     /// anything is deferred, so that a pane list asked for earlier and
     /// applied in between does not put the old order back.
     fn count_tab_move(&self) {
-        *self.tab_moves.lock().unwrap() += 1;
+        self.tab_moves.lock().unwrap().made += 1;
     }
 
     /// Send the order of a moved local window to `remote_windows`, unless
-    /// the server is known to predate the request.
+    /// the server is known to predate the request. The move counts as
+    /// queued in the same poll that queues every one of its requests, which
+    /// are started together so that none waits behind an answer; a pane list
+    /// asked for afterwards is behind all of them on the wire.
     async fn send_tab_orders(&self, local_window_id: WindowId, remote_windows: Vec<WindowId>) {
-        if self.tab_order_support() == TabOrderSupport::No {
-            return;
-        }
-        for request in self.tab_order_requests(local_window_id, &remote_windows) {
-            if let Err(err) = self.client.set_window_tab_order(request).await {
-                self.note_tab_order_refusal(&err);
-            }
+        let requests = if self.tab_order_support() == TabOrderSupport::No {
+            vec![]
+        } else {
+            self.tab_order_requests(local_window_id, &remote_windows)
+        };
+        self.tab_moves.lock().unwrap().queued += 1;
+        let answers = futures::future::join_all(
+            requests
+                .into_iter()
+                .map(|request| self.client.set_window_tab_order(request)),
+        )
+        .await;
+        for err in answers.into_iter().filter_map(Result::err) {
+            self.note_tab_order_refusal(&err);
         }
     }
 
@@ -328,12 +345,11 @@ impl ClientInner {
     }
 
     /// The remote ids this client has local copies of, and how many tab
-    /// moves had been made, taken before it asks the server for its pane
-    /// list. An id in here that the list leaves out
-    /// was removed on the server. An id the client learned of while the
-    /// request was in flight, such as a tab whose spawn reply arrived first,
-    /// is missing from the list only because the list is older, and is not
-    /// in here.
+    /// moves it has queued, taken before it asks the server for its pane
+    /// list. An id in here that the list leaves out was removed on the
+    /// server. An id the client learned of while the request was in flight,
+    /// such as a tab whose spawn reply arrived first, is missing from the
+    /// list only because the list is older, and is not in here.
     fn known_remote_ids(&self) -> KnownRemoteIds {
         KnownRemoteIds {
             windows: self
@@ -357,7 +373,7 @@ impl ClientInner {
                 .keys()
                 .copied()
                 .collect(),
-            tab_moves: self.tab_moves(),
+            tab_moves_queued: self.tab_moves().queued,
         }
     }
 
@@ -437,7 +453,7 @@ impl ClientInner {
             remote_to_local_tab: Mutex::new(HashMap::new()),
             remote_to_local_pane: Mutex::new(HashMap::new()),
             tab_order_support: Mutex::new(TabOrderSupport::Unknown),
-            tab_moves: Mutex::new(0),
+            tab_moves: Mutex::new(TabMoves::default()),
             focused_remote_pane_id: Mutex::new(None),
         }
     }
@@ -803,7 +819,7 @@ impl ClientDomain {
             windows: mut remote_windows_to_forget,
             tabs: mut remote_tabs_to_forget,
             panes: mut remote_panes_to_forget,
-            tab_moves,
+            tab_moves_queued,
         } = known;
         let mut tab_order: HashMap<WindowId, Vec<TabId>> = HashMap::new();
 
@@ -964,11 +980,16 @@ impl ClientDomain {
         }
 
         // A server that takes tab orders owns them, so show its order, unless
-        // this client sent a move after asking for this list, which then
-        // predates it. A server that does not, or one not asked yet, keeps
-        // its own order, so a move made here stays as it is. Applied without
-        // WindowTabOrderChanged, which would send the order back.
-        if inner.tab_order_support() == TabOrderSupport::Yes && inner.tab_moves() == tab_moves {
+        // a move made here is not yet queued or was queued after this list
+        // was asked for, which then predates it. A server that does not, or
+        // one not asked yet, keeps its own order, so a move made here stays
+        // as it is. Applied without WindowTabOrderChanged, which would send
+        // the order back.
+        let moves = inner.tab_moves();
+        if inner.tab_order_support() == TabOrderSupport::Yes
+            && moves.made == moves.queued
+            && moves.queued == tab_moves_queued
+        {
             for (remote_window_id, order) in tab_order {
                 if let Some(local_window_id) = inner.remote_to_local_window(remote_window_id) {
                     let local: Vec<TabId> = order
@@ -1552,6 +1573,16 @@ mod test {
                 .collect()
         }
 
+        /// Send the local window's order, as a move does, with the server
+        /// answering it.
+        fn send_tab_orders(&self) -> Vec<SetWindowTabOrder> {
+            let inner = Arc::clone(&self.inner);
+            let local = self.local_window();
+            self.tab_orders_answered(None, async move {
+                inner.send_tab_orders(local, vec![WINDOW]).await
+            })
+        }
+
         /// The remote panes the client asked the server to kill.
         fn kills_sent(&self) -> Vec<PaneId> {
             self.run_queued();
@@ -1859,8 +1890,70 @@ mod test {
         );
         assert_eq!(f.window_tab_ids(), vec![t2, t3, t1]);
 
+        f.send_tab_orders();
         f.resync(pane_list(&[(3, &[30]), (1, &[10]), (2, &[20])]));
         assert_eq!(f.window_tab_ids(), vec![t3, t1, t2]);
+    }
+
+    /// A pane list asked for after a move was made but before its request
+    /// was queued is ahead of that request on the wire, so it predates the
+    /// move and leaves the tabs where they are.
+    #[test]
+    fn a_list_requested_before_a_move_is_queued_keeps_the_move() {
+        let f = Fixture::new();
+        f.inner.set_tab_order_support(TabOrderSupport::Yes);
+        f.resync(pane_list(&[(1, &[10]), (2, &[20])]));
+        let (t1, t2) = (f.local_tab(1), f.local_tab(2));
+        f.move_tabs_locally(&[t2, t1]);
+        f.inner.count_tab_move();
+        let known_before_the_request = f.inner.known_remote_ids();
+        f.send_tab_orders();
+
+        f.resync_knowing(
+            pane_list(&[(1, &[10]), (2, &[20])]),
+            known_before_the_request,
+        );
+
+        assert_eq!(f.window_tab_ids(), vec![t2, t1]);
+    }
+
+    /// A move queues its request to every remote window in one step, so
+    /// that no pane list can be asked for between two of them.
+    #[test]
+    fn a_move_queues_a_request_for_each_remote_window_at_once() {
+        let f = Fixture::new();
+        f.resync(pane_list(&[(1, &[10])]));
+        let local = f.local_window();
+        f.inner
+            .record_remote_to_local_window_mapping(OTHER_WINDOW, local);
+        let inner = Arc::clone(&f.inner);
+
+        let first_batch = f.tab_orders_answered(None, async move {
+            inner
+                .send_tab_orders(local, vec![WINDOW, OTHER_WINDOW])
+                .await
+        });
+
+        assert_eq!(first_batch.len(), 2);
+    }
+
+    /// A move made while the server is known to predate tab orders sends
+    /// nothing but still counts as queued, so the server's order is shown
+    /// again once a later connection learns the server takes it.
+    #[test]
+    fn a_move_not_sent_to_an_older_server_does_not_stop_its_order_later() {
+        let f = Fixture::new();
+        f.resync(pane_list(&[(1, &[10]), (2, &[20])]));
+        let (t1, t2) = (f.local_tab(1), f.local_tab(2));
+        f.inner.set_tab_order_support(TabOrderSupport::No);
+        f.move_tabs_locally(&[t2, t1]);
+        f.inner.count_tab_move();
+        assert_eq!(f.send_tab_orders(), vec![]);
+
+        f.inner.set_tab_order_support(TabOrderSupport::Yes);
+        f.resync(pane_list(&[(1, &[10]), (2, &[20])]));
+
+        assert_eq!(f.window_tab_ids(), vec![t1, t2]);
     }
 
     /// A server that does not take tab orders keeps its own order. A resync
