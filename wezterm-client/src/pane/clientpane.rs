@@ -241,12 +241,9 @@ impl ClientPane {
     }
 
     /// Arrange to suppress the next Pane::kill call.
-    /// This is a bit of a hack that we use when closing a window;
-    /// our Domain::local_window_is_closing impl calls this for each
-    /// ClientPane in the window so that closing a window effectively
-    /// "detaches" the window so that reconnecting later will resume
-    /// from where they left off.
-    /// It isn't perfect.
+    /// ClientDomain uses this before it removes a pane from the local mux
+    /// that the server no longer has: Mux::remove_pane calls kill, which
+    /// would otherwise ask the server to kill that pane id.
     pub fn ignore_next_kill(&self) {
         *self.ignore_next_kill.lock() = true;
     }

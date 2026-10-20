@@ -1037,7 +1037,41 @@ impl Reconnectable {
     }
 }
 
+/// The requests sent through a client made by `Client::dummy`.
+#[cfg(test)]
+pub(crate) struct SentRequests(Receiver<ReaderMessage>);
+
+#[cfg(test)]
+impl SentRequests {
+    /// The requests sent since the last call, oldest first.
+    pub(crate) fn take(&self) -> Vec<Pdu> {
+        let mut pdus = vec![];
+        while let Ok(message) = self.0.try_recv() {
+            if let ReaderMessage::SendPdu { pdu, .. } = message {
+                pdus.push(pdu);
+            }
+        }
+        pdus
+    }
+}
+
 impl Client {
+    /// A client with no connection: nothing answers its requests, and each
+    /// one it sends can be read back from the returned `SentRequests`.
+    #[cfg(test)]
+    pub(crate) fn dummy() -> (Self, SentRequests) {
+        let (sender, receiver) = unbounded();
+        let client = Self {
+            sender,
+            local_domain_id: None,
+            client_id: ClientId::new(),
+            client_domain_config: ClientDomainConfig::Unix(UnixDomain::default()),
+            is_reconnectable: false,
+            is_local: false,
+        };
+        (client, SentRequests(receiver))
+    }
+
     fn new(local_domain_id: Option<DomainId>, mut reconnectable: Reconnectable) -> Self {
         let client_domain_config = reconnectable.config.clone();
         let is_reconnectable = reconnectable.reconnectable();
