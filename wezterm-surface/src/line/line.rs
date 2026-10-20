@@ -1145,7 +1145,9 @@ impl Line {
     }
 
     /// Given a starting attribute value, produce a series of Change
-    /// entries to recreate the current line
+    /// entries to recreate the current line.  They leave the attributes
+    /// of the last visible cell in effect, so callers can pass those as
+    /// the starting value for the next line.
     pub fn changes(&self, start_attr: &CellAttributes) -> Vec<Change> {
         let mut result = Vec::new();
         let mut attr = start_attr.clone();
@@ -1182,14 +1184,6 @@ impl Line {
                 if num_trailing_spaces > 0 {
                     if !left.is_empty() {
                         result.push(Change::Text(left));
-                    } else if result.len() == 1 {
-                        // if the only queued result prior to clearing
-                        // to the end of the line is an attribute change,
-                        // we can prune it out and return just the line
-                        // clearing operation
-                        if let Change::AllAttributes(_) = result[0] {
-                            result.clear()
-                        }
                     }
 
                     // Since this function is only called in the full repaint
