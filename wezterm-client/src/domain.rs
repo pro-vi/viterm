@@ -901,6 +901,12 @@ impl ClientDomain {
                         pane
                     };
                     reported_sizes.push((Arc::clone(&pane), reported_size));
+                    // A pane draws nothing until the server pushes a change,
+                    // so one that stays quiet would report no working directory
+                    // for as long as it is quiet; the listing carries it.
+                    if let Some(client_pane) = pane.downcast_ref::<ClientPane>() {
+                        client_pane.seed_working_dir(entry.working_dir.clone().map(Into::into));
+                    }
                     pane
                 });
                 if topology_changed {
