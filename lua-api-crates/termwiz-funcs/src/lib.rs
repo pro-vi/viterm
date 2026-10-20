@@ -301,3 +301,45 @@ pub fn lines_to_escapes(lines: Vec<Line>) -> anyhow::Result<String> {
     renderer.render_to(&changes, &mut target)?;
     Ok(String::from_utf8(target.target)?)
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use termwiz::cell::Underline;
+    use termwiz::surface::SEQ_ZERO;
+
+    fn line_from_runs(runs: &[(&str, &CellAttributes)]) -> Line {
+        let mut line = Line::new(SEQ_ZERO);
+        for (text, attrs) in runs {
+            line.append_line(Line::from_text(text, attrs, SEQ_ZERO, None), SEQ_ZERO);
+        }
+        line
+    }
+
+    #[test]
+    fn escapes_reset_attrs_on_blank_line() {
+        let plain = CellAttributes::blank();
+        let underline = CellAttributes::blank()
+            .set_underline(Underline::Single)
+            .clone();
+        let lines = vec![
+            line_from_runs(&[("  para one ends ", &plain), ("short", &underline)]),
+            line_from_runs(&[("     ", &plain)]),
+            line_from_runs(&[
+                ("  plain words ", &plain),
+                ("next", &underline),
+                (" done", &plain),
+            ]),
+        ];
+        // The blank line carries the reset; without it, the plain text
+        // that starts the last line would read as underlined
+        assert_eq!(
+            lines_to_escapes(lines).unwrap(),
+            concat!(
+                "  para one ends \x1b(B\x1b[0;4mshort\r\n",
+                "\x1b(B\x1b[0m\r\n",
+                "  plain words \x1b(B\x1b[0;4mnext\x1b(B\x1b[0m done\r\n",
+            )
+        );
+    }
+}

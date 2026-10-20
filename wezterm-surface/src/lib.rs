@@ -928,7 +928,7 @@ mod test {
     use alloc::sync::Arc;
     use wezterm_cell::color::AnsiColor;
     use wezterm_cell::image::ImageData;
-    use wezterm_cell::{AttributeChange, Intensity};
+    use wezterm_cell::{AttributeChange, Intensity, Underline};
 
     // The \x20's look a little awkward, but we can't use a plain
     // space in the first chararcter of a multi-line continuation;
@@ -1309,8 +1309,59 @@ mod test {
                 ),
                 Change::Text("ab".into()),
                 Change::CursorPosition {
+                    x: Position::Absolute(0),
+                    y: Position::Relative(1),
+                },
+                Change::AllAttributes(CellAttributes::default()),
+                Change::CursorPosition {
                     x: Position::Absolute(2),
                     y: Position::Absolute(0),
+                },
+                Change::CursorVisibility(CursorVisibility::Visible),
+            ],
+            &*changes
+        );
+    }
+
+    #[test]
+    fn dont_carry_attrs_over_blank_line() {
+        let mut s = Surface::new(2, 3);
+        s.add_change(Change::Attribute(AttributeChange::Underline(
+            Underline::Single,
+        )));
+        s.add_change("ab");
+        s.add_change(Change::AllAttributes(CellAttributes::default()));
+        s.add_change(Change::CursorPosition {
+            x: Position::Absolute(0),
+            y: Position::Absolute(2),
+        });
+        s.add_change("cd");
+        let (_seq, changes) = s.get_changes(0);
+        // The blank middle line must reset the attributes, otherwise
+        // "cd" is painted underlined
+        assert_eq!(
+            &[
+                Change::CursorVisibility(CursorVisibility::Hidden),
+                Change::ClearScreen(Default::default()),
+                Change::AllAttributes(
+                    CellAttributes::default()
+                        .set_underline(Underline::Single)
+                        .clone()
+                ),
+                Change::Text("ab".into()),
+                Change::CursorPosition {
+                    x: Position::Absolute(0),
+                    y: Position::Relative(1),
+                },
+                Change::AllAttributes(CellAttributes::default()),
+                Change::CursorPosition {
+                    x: Position::Absolute(0),
+                    y: Position::Relative(1),
+                },
+                Change::Text("cd".into()),
+                Change::CursorPosition {
+                    x: Position::Absolute(2),
+                    y: Position::Absolute(2),
                 },
                 Change::CursorVisibility(CursorVisibility::Visible),
             ],
