@@ -855,9 +855,13 @@ impl Tab {
         request: SplitRequest,
         pane: Arc<dyn Pane>,
     ) -> anyhow::Result<usize> {
-        self.inner
+        let index = self
+            .inner
             .lock()
-            .split_and_insert(pane_index, request, pane)
+            .split_and_insert(pane_index, request, pane)?;
+        // Let the other clients of a mux server learn of the new layout
+        Mux::try_get().map(|mux| mux.notify(MuxNotification::TabResized(self.tab_id)));
+        Ok(index)
     }
 
     pub fn get_zoomed_pane(&self) -> Option<Arc<dyn Pane>> {
@@ -3207,6 +3211,41 @@ mod test {
 
         let received: SplitDirectionAndSize = varbincode::deserialize(with.as_slice()).unwrap();
         assert_eq!(received, split(None));
+    }
+
+    /// A split made on a mux server must reach its other clients, and a
+    /// `TabResized` is what makes a client re-read the tab.
+    #[test]
+    fn tab_split_announces_the_new_layout() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let _guard = MUX_TEST_GUARD.lock();
+        let size = TerminalSize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 800,
+            pixel_height: 600,
+            dpi: 96,
+        };
+        let mux = Arc::new(Mux::new(None));
+        Mux::set_mux(&mux);
+        let tab = Tab::new(&size);
+        tab.assign_pane(&FakePane::new(1, size));
+        let tab_id = tab.tab_id();
+        let announced = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&announced);
+        mux.subscribe(move |notification| {
+            if matches!(notification, MuxNotification::TabResized(id) if id == tab_id) {
+                seen.fetch_add(1, Ordering::SeqCst);
+            }
+            true
+        });
+
+        tab.split_and_insert(0, SplitRequest::default(), FakePane::new(2, size))
+            .unwrap();
+
+        assert_eq!(1, announced.load(Ordering::SeqCst));
+        Mux::shutdown();
     }
 
     fn is_send_and_sync<T: Send + Sync>() -> bool {
