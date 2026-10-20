@@ -81,8 +81,9 @@ impl Window {
     /// Notify that this window's tab layout has changed (add/remove/reorder),
     /// so listeners can refresh any cached view of it.
     fn invalidate(&self) {
-        let mux = Mux::get();
-        mux.notify(MuxNotification::WindowInvalidated(self.id));
+        if let Some(mux) = Mux::try_get() {
+            mux.notify(MuxNotification::WindowInvalidated(self.id));
+        }
     }
 
     /// Insert `tab` in window, at given index.
@@ -331,21 +332,17 @@ impl Window {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::tab::test::MUX_TEST_GUARD;
-    use parking_lot::MutexGuard;
     use wezterm_term::TerminalSize;
 
-    /// A window of `count` new tabs. `invalidate` needs a mux.
-    fn window_of(count: usize) -> (Window, Vec<TabId>, MutexGuard<'static, ()>) {
-        let guard = MUX_TEST_GUARD.lock();
-        config::use_test_configuration();
-        Mux::set_mux(&Arc::new(Mux::new(None)));
+    /// A window of `count` new tabs, with no mux: a workspace given to
+    /// `Window::new` is not looked up, and nothing is notified.
+    fn window_of(count: usize) -> (Window, Vec<TabId>) {
         let mut window = Window::new(Some(String::new()), None);
         for _ in 0..count {
             window.push_tab(&Arc::new(Tab::new(&TerminalSize::default())));
         }
         let ids = window.tabs.iter().map(|tab| tab.tab_id()).collect();
-        (window, ids, guard)
+        (window, ids)
     }
 
     fn order(window: &Window) -> Vec<TabId> {
@@ -354,7 +351,7 @@ mod test {
 
     #[test]
     fn set_tab_order_moves_the_named_tabs_and_keeps_the_active_one() {
-        let (mut window, t, _guard) = window_of(4);
+        let (mut window, t) = window_of(4);
 
         assert!(window.set_tab_order(&[t[2], t[0], t[1], t[3]]));
 
@@ -365,7 +362,7 @@ mod test {
 
     #[test]
     fn set_tab_order_leaves_unnamed_tabs_in_place() {
-        let (mut window, t, _guard) = window_of(4);
+        let (mut window, t) = window_of(4);
         let unknown = t[3] + 1000;
 
         assert!(window.set_tab_order(&[t[2], unknown, t[0], t[2]]));
