@@ -81,8 +81,9 @@ impl Window {
     /// Notify that this window's tab layout has changed (add/remove/reorder),
     /// so listeners can refresh any cached view of it.
     fn invalidate(&self) {
-        let mux = Mux::get();
-        mux.notify(MuxNotification::WindowInvalidated(self.id));
+        if let Some(mux) = Mux::try_get() {
+            mux.notify(MuxNotification::WindowInvalidated(self.id));
+        }
     }
 
     /// Insert `tab` in window, at given index.
@@ -333,10 +334,9 @@ mod test {
     use super::*;
     use wezterm_term::TerminalSize;
 
-    /// A window of `count` new tabs. `invalidate` needs a mux.
+    /// A window of `count` new tabs, with no mux: a workspace given to
+    /// `Window::new` is not looked up, and nothing is notified.
     fn window_of(count: usize) -> (Window, Vec<TabId>) {
-        config::use_test_configuration();
-        Mux::set_mux(&Arc::new(Mux::new(None)));
         let mut window = Window::new(Some(String::new()), None);
         for _ in 0..count {
             window.push_tab(&Arc::new(Tab::new(&TerminalSize::default())));

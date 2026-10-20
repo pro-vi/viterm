@@ -1053,6 +1053,19 @@ impl SentRequests {
         }
         pdus
     }
+
+    /// Answer each request sent since the last call with `respond`, and
+    /// return the requests, oldest first.
+    pub(crate) fn answer(&self, respond: impl Fn(&Pdu) -> anyhow::Result<Pdu>) -> Vec<Pdu> {
+        let mut pdus = vec![];
+        while let Ok(message) = self.0.try_recv() {
+            if let ReaderMessage::SendPdu { pdu, promise } = message {
+                promise.try_send(respond(&pdu)).ok();
+                pdus.push(pdu);
+            }
+        }
+        pdus
+    }
 }
 
 impl Client {

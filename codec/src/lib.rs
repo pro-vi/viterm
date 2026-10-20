@@ -778,8 +778,10 @@ pub struct SetWindowWorkspace {
 }
 
 /// Put the tabs of a window in this order; tabs it does not name keep their
-/// place (see `Window::set_tab_order`). A server that applies it tells its
-/// clients with TabAddedToWindow; one that predates it answers with an error.
+/// place (see `Window::set_tab_order`), so an empty order moves nothing and
+/// tells a client whether the server takes the request. A server that
+/// applies it tells its clients with TabAddedToWindow; one that predates it
+/// answers that the PDU is invalid.
 #[derive(Deserialize, Serialize, PartialEq, Debug)]
 pub struct SetWindowTabOrder {
     pub window_id: WindowId,
