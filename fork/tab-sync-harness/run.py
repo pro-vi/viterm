@@ -10,14 +10,17 @@ compares the tabs the GUI lists with the server's.
 scenario:
   ghost  a tab is spawned in the second window and its only pane is moved
          into a tab of the first (`split-pane --move-pane-id`), so the server
-         removes the emptied tab. The GUI should show the move at once, which
-         needs the server to announce it; after its next resync (forced here
-         by spawning a tab) it must drop the emptied tab too and show the
-         moved pane once.
+         removes the emptied tab. A server that announces the move makes the
+         GUI resync at once, and the checks marked "after the move" need that
+         resync: the moved pane once, the emptied tab gone. The same checks
+         run again after a spawn, which makes every client resync whatever
+         the server announces.
   order  one window of four titled tabs and two GUIs; the second GUI moves
          the first tab to the third place, as the MoveTab key does. The
          server must take the new order, the first GUI must show it, and a
-         GUI attached afterwards must show it too. WATCHER_GUI=<path> runs
+         GUI attached afterwards must show it too. A tab spawned after the
+         move makes every client resync, and the moving GUI must still show
+         its move after that, against any server. WATCHER_GUI=<path> runs
          the first GUI from another binary.
 
 out-dir must contain "tab-sync-harness"; the server's socket lives in it.
@@ -67,7 +70,9 @@ class Harness:
                 break
             time.sleep(0.1)
         else:
-            raise RuntimeError("the server made no socket")
+            pid = self.server.pid
+            self.stop()
+            raise RuntimeError(f"the server (pid {pid}) made no socket in 10 s; stopped it")
 
     def cli(self, *args, sock=None):
         env = {**self.env, "WEZTERM_UNIX_SOCKET": sock or self.sock}
@@ -96,6 +101,11 @@ class Harness:
         gui.terminate()
         gui.wait(10)
         self.guis.remove(gui)
+        # A GUI ended by a signal leaves its socket file behind.
+        try:
+            os.unlink(gui.sock)
+        except FileNotFoundError:
+            pass
 
     def gui_rows(self, gui=None):
         gui = gui or self.guis[-1]
@@ -168,6 +178,18 @@ def first_pane(h):
     return rows[0]
 
 
+def same_as_server(h, when, server, gui):
+    """The GUI shows the server's tabs: as many, none holding a pane twice,
+    and each window holding as many as its server window."""
+    h.check(f"{when}: the GUI lists as many tabs as the server",
+            len(tabs(gui)) == len(tabs(server)), f"GUI {len(tabs(gui))}, server {len(tabs(server))}")
+    h.check(f"{when}: the GUI shows no pane in two tabs", not panes_in_two_tabs(gui),
+            str(panes_in_two_tabs(gui)))
+    h.check(f"{when}: the GUI's windows hold the server's tab counts",
+            tabs_per_window(gui) == tabs_per_window(server),
+            f"GUI {tabs_per_window(gui)}, server {tabs_per_window(server)}")
+
+
 def ghost(h):
     first = [first_pane(h)]
     w1, a = first[0]["window_id"], first[0]["pane_id"]
@@ -192,8 +214,9 @@ def ghost(h):
             f"{len(tabs(server))} tabs")
     # The server announces the move only if a split notifies its clients;
     # without that the GUI catches up at its next resync for another reason.
-    h.check("GUI shows the move by itself: a tab with two panes",
+    h.check("after the move: the GUI shows a tab with two panes",
             any(len(p) == 2 for _w, _t, p in tabs(gui)), f"{len(tabs(gui))} tabs")
+    same_as_server(h, "after the move", server, gui)
 
     # A new tab makes every client resync, as any later change in a busy
     # session does.
@@ -202,12 +225,7 @@ def ghost(h):
     server, gui = h.server_rows(), h.gui_rows()
     h.save("server-after", server)
     h.save("gui-after", gui)
-    h.check("GUI lists as many tabs as the server",
-            len(tabs(gui)) == len(tabs(server)), f"GUI {len(tabs(gui))}, server {len(tabs(server))}")
-    h.check("GUI shows no pane in two tabs", not panes_in_two_tabs(gui), str(panes_in_two_tabs(gui)))
-    h.check("GUI windows hold the server's tab counts",
-            tabs_per_window(gui) == tabs_per_window(server),
-            f"GUI {tabs_per_window(gui)}, server {tabs_per_window(server)}")
+    same_as_server(h, "after a spawn", server, gui)
     h.check("server kept every pane", len(server) == 6, f"{len(server)} panes")
     return h.failures
 
@@ -252,10 +270,23 @@ def order(h):
     h.check("the other GUI shows the new order", titles_in_order(seen_by_watcher) == moved,
             str(titles_in_order(seen_by_watcher)))
 
+    # A new tab makes every client resync, and a resync must not undo the
+    # move, whether or not the server took it.
+    e = int(h.cli("spawn", "--window-id", str(w)))
+    e_tab = next(r["tab_id"] for r in h.server_rows() if r["pane_id"] == e)
+    h.cli("set-tab-title", "--tab-id", str(e_tab), "E")
+    h.check("the moving GUI shows the spawned tab", h.wait_for_gui_tabs(5, mover))
+    time.sleep(2)
+    seen_by_mover = h.gui_rows(mover)
+    h.save("mover-after-spawn", seen_by_mover)
+    moved = moved + ["E"]
+    h.check("after a resync the moving GUI still shows its move",
+            titles_in_order(seen_by_mover) == moved, str(titles_in_order(seen_by_mover)))
+
     h.detach(mover)
     h.detach(watcher)
     later = h.attach()
-    h.check("a GUI attached afterwards lists the tabs", h.wait_for_gui_tabs(4, later))
+    h.check("a GUI attached afterwards lists the tabs", h.wait_for_gui_tabs(5, later))
     seen_later = h.gui_rows(later)
     h.save("later-gui", seen_later)
     h.check("a GUI attached afterwards shows the new order", titles_in_order(seen_later) == moved,
