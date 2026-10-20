@@ -93,6 +93,16 @@ impl UserData for MuxWindow {
             }
             Ok(result)
         });
+        methods.add_method("set_tab_order", |_, this, order: Vec<TabId>| {
+            let mux = get_mux()?;
+            let moved = this.resolve_mut(&mux)?.set_tab_order(&order);
+            // The window lock is released before notifying: a handler of
+            // the notification reads the window.
+            if moved {
+                mux.notify(mux::MuxNotification::WindowTabOrderChanged(this.0));
+            }
+            Ok(moved)
+        });
         methods.add_method("active_tab", |_, this, _: ()| {
             let mux = get_mux()?;
             let window = this.resolve(&mux)?;
