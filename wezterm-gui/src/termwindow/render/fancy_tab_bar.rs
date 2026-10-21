@@ -226,21 +226,51 @@ impl TabLook {
                 bottom: w,
             },
         };
-        let inner = PixelDimension {
+        Some((outer, self.inner_of(&outer)))
+    }
+
+    /// The tab's own padding inside a marker of width `outer`.
+    fn inner_of(&self, outer: &PixelDimension) -> PixelDimension {
+        PixelDimension {
             left: (self.padding_x - outer.left).max(0.),
             right: (self.padding_x - outer.right).max(0.),
             top: (self.padding_y - outer.top).max(0.),
             bottom: (self.padding_y - outer.bottom).max(0.),
-        };
-        Some((outer, inner))
+        }
     }
 
     /// Puts the active tab inside an element of the marker color that
     /// shows around it on the marker's sides.
-    fn mark(&self, mut tab: Element, font: &Rc<LoadedFont>, color: LinearRgba) -> Element {
-        let Some((outer, inner)) = self.marker_split() else {
-            return tab;
+    fn mark(&self, tab: Element, font: &Rc<LoadedFont>, color: LinearRgba) -> Element {
+        match self.marker_split() {
+            Some((outer, inner)) => self.surround(tab, font, color, outer, inner),
+            None => tab,
+        }
+    }
+
+    /// Puts a tab inside a ring of `color`, whatever marker the style gives
+    /// the active tab, so it shows in a style whose active tab is marked by
+    /// its fill alone.
+    fn ring(&self, tab: Element, font: &Rc<LoadedFont>, color: LinearRgba) -> Element {
+        let w = self.marker_width.max(2.);
+        let outer = PixelDimension {
+            left: w,
+            right: w,
+            top: w,
+            bottom: w,
         };
+        let inner = self.inner_of(&outer);
+        self.surround(tab, font, color, outer, inner)
+    }
+
+    fn surround(
+        &self,
+        mut tab: Element,
+        font: &Rc<LoadedFont>,
+        color: LinearRgba,
+        outer: PixelDimension,
+        inner: PixelDimension,
+    ) -> Element {
         // One hover region per tab: two would make crossing the marker a
         // hover change, and each hover change rebuilds every tab title.
         let item_type = tab.item_type.take();
@@ -780,11 +810,50 @@ impl crate::TermWindow {
                 let active_tab = mux::Mux::get()
                     .get_window(self.mux_window_id)
                     .map(|window| window.get_active_tab_idx());
+                // Each tab is led by its hint, a key that activates it, in
+                // quick select's label colors; the tab it was opened for is
+                // marked in those colors too.
+                let hints =
+                    tabgrouppopup::hints(&self.config.quick_select_alphabet, group.tabs.len());
+                let (hint_fg, hint_bg) = tabgrouppopup::hint_colors(&self.config, palette);
+                let marked = self.get_modal().and_then(|modal| {
+                    modal
+                        .downcast_ref::<tabgrouppopup::TabGroupPopup>()
+                        .and_then(|popup| popup.marked)
+                });
                 let mut entries = vec![];
-                for (tab_idx, active, entry) in group.entries(active_tab) {
+                for (k, (tab_idx, active, entry)) in
+                    group.entries(active_tab).into_iter().enumerate()
+                {
+                    if let Some(hint) = hints.get(k) {
+                        entries.push(
+                            Element::new(&font, ElementContent::Text(hint.to_string()))
+                                .vertical_align(VerticalAlign::Middle)
+                                .margin(BoxDimension {
+                                    left: Dimension::Cells(0.3),
+                                    right: Dimension::Cells(0.15),
+                                    top: Dimension::Pixels(0.),
+                                    bottom: Dimension::Pixels(0.),
+                                })
+                                .padding(BoxDimension {
+                                    left: Dimension::Cells(0.25),
+                                    right: Dimension::Cells(0.25),
+                                    top: Dimension::Pixels(0.),
+                                    bottom: Dimension::Pixels(0.),
+                                })
+                                .colors(ElementColors {
+                                    border: BorderColor::new(hint_bg),
+                                    bg: hint_bg.into(),
+                                    text: hint_fg.into(),
+                                })
+                                .item_type(UIItemType::TabGroupPopup(Some(tab_idx))),
+                        );
+                    }
                     let mut elem = item_to_elem(&entry);
                     if active {
                         elem = look.mark(elem, &font, marker_color);
+                    } else if marked == group.ids.get(k).copied() {
+                        elem = look.ring(elem, &font, hint_bg);
                     }
                     elem.item_type = Some(UIItemType::TabGroupPopup(Some(tab_idx)));
                     entries.push(elem);

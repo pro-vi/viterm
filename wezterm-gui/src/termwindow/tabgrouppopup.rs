@@ -10,21 +10,33 @@ use crate::termwindow::box_model::ComputedElement;
 use crate::termwindow::modal::Modal;
 use crate::termwindow::UIItemType;
 use crate::TermWindow;
+use config::{ColorSpec, ConfigHandle};
 use mux::tab::TabId;
 use std::cell::{Ref, RefCell};
+use termwiz::color::AnsiColor;
+use wezterm_term::color::{ColorAttribute, ColorPalette};
 use wezterm_term::{KeyCode, KeyModifiers, MouseEvent};
+use window::color::LinearRgba;
 
 pub struct TabGroupPopup {
     /// A tab of the group the popup lists. Tab indices change when tabs
     /// move; the id names the group for as long as the tab is in it.
     pub tab_id: TabId,
+    /// The tab it was opened for, drawn marked: `window:open_tab_group_popup`
+    /// opens a group for one of its tabs without activating it.
+    pub marked: Option<TabId>,
+    /// The tab that was active when it opened. Activating another tab, by
+    /// any path, closes it.
+    pub opened_on: Option<TabId>,
     elements: RefCell<Vec<ComputedElement>>,
 }
 
 impl TabGroupPopup {
-    pub fn new(tab_id: TabId) -> Self {
+    pub fn new(tab_id: TabId, marked: Option<TabId>, opened_on: Option<TabId>) -> Self {
         Self {
             tab_id,
+            marked,
+            opened_on,
             elements: RefCell::new(vec![]),
         }
     }
@@ -40,20 +52,39 @@ impl Modal for TabGroupPopup {
         Ok(())
     }
 
-    /// Escape closes the popup. Any other key goes on to the key bindings,
-    /// so a binding such as ActivateTab still works while it is open.
+    /// A tab's hint activates that tab and Escape closes the popup. A key
+    /// with Cmd, Ctrl or Alt goes on to the key bindings with the popup
+    /// open, so a binding such as ActivateTab still works. Any other key
+    /// closes the popup and goes on, past the bindings, to the pane.
     fn key_down(
         &self,
         key: KeyCode,
         mods: KeyModifiers,
         term_window: &mut TermWindow,
     ) -> anyhow::Result<bool> {
-        match (key, mods) {
-            (KeyCode::Escape, KeyModifiers::NONE) => {
+        let tabs = term_window
+            .tab_bar
+            .folded_group_of(self.tab_id)
+            .map(|group_idx| term_window.tab_bar.folded()[group_idx].tabs.clone());
+        let count = tabs.as_ref().map_or(0, |tabs| tabs.len());
+        let hints = hints(&term_window.config.quick_select_alphabet, count);
+        match key_on_hints(&key, mods, &hints) {
+            HintKey::Pick(k) => {
+                if let Some(tabs) = tabs {
+                    term_window.activate_tab((tabs.start + k) as isize).ok();
+                }
+                term_window.close_tab_group_popup();
+                Ok(true)
+            }
+            HintKey::Close => {
                 term_window.cancel_modal();
                 Ok(true)
             }
-            _ => Ok(false),
+            HintKey::Leave => {
+                term_window.cancel_modal();
+                Ok(false)
+            }
+            HintKey::Pass => Ok(false),
         }
     }
 
@@ -70,6 +101,73 @@ impl Modal for TabGroupPopup {
     fn reconfigure(&self, term_window: &mut TermWindow) {
         term_window.invalidate_fancy_tab_bar();
     }
+}
+
+/// The hints for `count` items: the first `count` distinct characters of
+/// `alphabet` (the `quick_select_alphabet` option), lowercased. Fewer when
+/// the alphabet is shorter, so the items past its end get none.
+pub fn hints(alphabet: &str, count: usize) -> Vec<char> {
+    let mut out: Vec<char> = vec![];
+    for c in alphabet.chars().flat_map(char::to_lowercase) {
+        if out.len() == count {
+            break;
+        }
+        if !out.contains(&c) {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// What a key press does while hints are drawn, by the key and its
+/// modifiers. `hints` is the character of each item, in order.
+#[derive(Debug, PartialEq, Eq)]
+pub enum HintKey {
+    /// The key is item `k`'s hint.
+    Pick(usize),
+    /// Escape: close, and the key goes no further.
+    Close,
+    /// Any other key without Cmd, Ctrl or Alt: close, and the key goes on to
+    /// the pane.
+    Leave,
+    /// A key with Cmd, Ctrl or Alt, or a modifier key on its own: stay open,
+    /// and the key goes on to the key bindings.
+    Pass,
+}
+
+pub fn key_on_hints(key: &KeyCode, mods: KeyModifiers, hints: &[char]) -> HintKey {
+    if key.is_modifier() {
+        return HintKey::Pass;
+    }
+    if mods.intersects(KeyModifiers::SUPER | KeyModifiers::CTRL | KeyModifiers::ALT) {
+        return HintKey::Pass;
+    }
+    match key {
+        KeyCode::Escape if mods == KeyModifiers::NONE => HintKey::Close,
+        KeyCode::Char(c) => match hints.iter().position(|h| h == c) {
+            Some(k) => HintKey::Pick(k),
+            None => HintKey::Leave,
+        },
+        _ => HintKey::Leave,
+    }
+}
+
+/// The colors a hint is drawn in: quick select's label colors, with the
+/// fallback quick select uses when they are not set.
+pub fn hint_colors(config: &ConfigHandle, palette: &ColorPalette) -> (LinearRgba, LinearRgba) {
+    let colors = &config.resolved_palette;
+    let fg: ColorAttribute = colors
+        .quick_select_label_fg
+        .unwrap_or(ColorSpec::from(AnsiColor::Olive))
+        .into();
+    let bg: ColorAttribute = colors
+        .quick_select_label_bg
+        .unwrap_or(ColorSpec::from(AnsiColor::Black))
+        .into();
+    (
+        palette.resolve_fg(fg).to_linear(),
+        palette.resolve_bg(bg).to_linear(),
+    )
 }
 
 /// What a mouse press does while a popup is open, by what it lands on.
@@ -242,6 +340,104 @@ mod test {
         assert_eq!(
             press_on_popup(Some(&UIItemType::ScrollThumb)),
             PressOnPopup::CloseOnly
+        );
+    }
+
+    #[test]
+    fn hints_are_the_alphabet_lowercased_one_per_item() {
+        assert_eq!(hints("asdfqwer", 3), vec!['a', 's', 'd']);
+        assert_eq!(hints("ASDF", 2), vec!['a', 's']);
+        assert_eq!(hints("as", 5), vec!['a', 's']);
+        assert_eq!(hints("aAsd", 3), vec!['a', 's', 'd']);
+    }
+
+    #[test]
+    fn an_empty_alphabet_gives_no_hints() {
+        assert!(hints("", 4).is_empty());
+        assert_eq!(
+            key_on_hints(&KeyCode::Char('a'), KeyModifiers::NONE, &hints("", 4)),
+            HintKey::Leave
+        );
+    }
+
+    #[test]
+    fn a_hint_picks_its_item() {
+        let h = hints("asd", 3);
+        assert_eq!(
+            key_on_hints(&KeyCode::Char('s'), KeyModifiers::NONE, &h),
+            HintKey::Pick(1)
+        );
+        assert_eq!(
+            key_on_hints(&KeyCode::Char('a'), KeyModifiers::NONE, &h),
+            HintKey::Pick(0)
+        );
+    }
+
+    #[test]
+    fn a_letter_past_the_hints_in_force_leaves() {
+        let h = hints("asdf", 3);
+        assert_eq!(
+            key_on_hints(&KeyCode::Char('f'), KeyModifiers::NONE, &h),
+            HintKey::Leave
+        );
+        assert_eq!(
+            key_on_hints(&KeyCode::Char('y'), KeyModifiers::NONE, &h),
+            HintKey::Leave
+        );
+        assert_eq!(
+            key_on_hints(&KeyCode::Enter, KeyModifiers::NONE, &h),
+            HintKey::Leave
+        );
+    }
+
+    #[test]
+    fn a_capital_letter_is_not_a_hint() {
+        assert_eq!(
+            key_on_hints(&KeyCode::Char('S'), KeyModifiers::SHIFT, &hints("asd", 3)),
+            HintKey::Leave
+        );
+    }
+
+    #[test]
+    fn escape_closes_and_shift_escape_leaves() {
+        let h = hints("asd", 3);
+        assert_eq!(
+            key_on_hints(&KeyCode::Escape, KeyModifiers::NONE, &h),
+            HintKey::Close
+        );
+        assert_eq!(
+            key_on_hints(&KeyCode::Escape, KeyModifiers::SHIFT, &h),
+            HintKey::Leave
+        );
+    }
+
+    #[test]
+    fn a_key_with_cmd_ctrl_or_alt_passes_to_the_bindings() {
+        let h = hints("asd", 3);
+        for mods in [KeyModifiers::SUPER, KeyModifiers::CTRL, KeyModifiers::ALT] {
+            assert_eq!(key_on_hints(&KeyCode::Char('5'), mods, &h), HintKey::Pass);
+            assert_eq!(key_on_hints(&KeyCode::Char('s'), mods, &h), HintKey::Pass);
+        }
+        assert_eq!(
+            key_on_hints(
+                &KeyCode::Char('F'),
+                KeyModifiers::ALT | KeyModifiers::SHIFT,
+                &h
+            ),
+            HintKey::Pass
+        );
+    }
+
+    #[test]
+    fn a_modifier_key_on_its_own_passes() {
+        let h = hints("asd", 3);
+        assert_eq!(
+            key_on_hints(&KeyCode::Super, KeyModifiers::NONE, &h),
+            HintKey::Pass
+        );
+        assert_eq!(
+            key_on_hints(&KeyCode::Shift, KeyModifiers::NONE, &h),
+            HintKey::Pass
         );
     }
 
