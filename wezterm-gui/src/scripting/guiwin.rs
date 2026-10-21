@@ -388,7 +388,55 @@ fn parse_tab_groups(groups: mlua::Value) -> mlua::Result<Vec<crate::tabbar::TabG
                 _ => return Err(fail(format!("entry {n}: tabs must be a list of tab ids"))),
             }
         }
-        specs.push(crate::tabbar::TabGroupSpec { tabs, label });
+        let marks = match entry.get::<_, mlua::Value>("marks")? {
+            mlua::Value::Nil => vec![],
+            mlua::Value::Table(list) => {
+                let bad = || {
+                    fail(format!(
+                        "entry {n}: marks must be a list of {{ tab = tab_id, glyph = text }} for tabs of the group"
+                    ))
+                };
+                let mut marks = vec![];
+                for mark in list.sequence_values::<mlua::Value>() {
+                    let mark = match mark? {
+                        mlua::Value::Table(m) => m,
+                        _ => return Err(bad()),
+                    };
+                    let tab = match mark.get::<_, mlua::Value>("tab")? {
+                        mlua::Value::Integer(id) if id >= 0 => id as mux::tab::TabId,
+                        mlua::Value::Number(id) if id >= 0. && id.fract() == 0. => {
+                            id as mux::tab::TabId
+                        }
+                        _ => return Err(bad()),
+                    };
+                    let glyph = match mark.get::<_, mlua::Value>("glyph")? {
+                        mlua::Value::String(g) if !g.as_bytes().is_empty() => g.to_str()?.to_string(),
+                        _ => return Err(bad()),
+                    };
+                    if !tabs.contains(&tab) {
+                        return Err(bad());
+                    }
+                    marks.push(crate::tabbar::TabGroupMark { tab, glyph });
+                }
+                marks
+            }
+            _ => {
+                return Err(fail(format!(
+                    "entry {n}: marks must be a list of {{ tab = tab_id, glyph = text }} for tabs of the group"
+                )))
+            }
+        };
+        let busy = match entry.get::<_, mlua::Value>("busy")? {
+            mlua::Value::Nil => None,
+            mlua::Value::String(b) => Some(b.to_str()?.to_string()),
+            _ => return Err(fail(format!("entry {n}: busy must be a string"))),
+        };
+        specs.push(crate::tabbar::TabGroupSpec {
+            tabs,
+            label,
+            marks,
+            busy,
+        });
     }
     Ok(specs)
 }
@@ -411,6 +459,32 @@ mod test {
         assert_eq!(groups[0].tabs, vec![3, 4]);
         assert_eq!(groups[0].label, "p");
         assert!(groups[1].tabs.is_empty());
+    }
+
+    #[test]
+    fn marks_and_busy_parse_with_their_group() {
+        let groups = parse(
+            r#"{ { tabs = { 3, 4 }, label = "p", marks = { { tab = 4, glyph = "!" } }, busy = "o" } }"#,
+        )
+        .unwrap();
+        assert_eq!(groups[0].marks.len(), 1);
+        assert_eq!(groups[0].marks[0].tab, 4);
+        assert_eq!(groups[0].marks[0].glyph, "!");
+        assert_eq!(groups[0].busy.as_deref(), Some("o"));
+    }
+
+    #[test]
+    fn a_mark_outside_its_group_or_without_a_glyph_is_an_error() {
+        for src in [
+            r#"{ { tabs = { 3, 4 }, label = "p", marks = { { tab = 9, glyph = "!" } } } }"#,
+            r#"{ { tabs = { 3, 4 }, label = "p", marks = { { tab = 4 } } } }"#,
+            r#"{ { tabs = { 3, 4 }, label = "p", marks = { { tab = 4, glyph = "" } } } }"#,
+            r#"{ { tabs = { 3, 4 }, label = "p", marks = "!" } }"#,
+            r#"{ { tabs = { 3, 4 }, label = "p", busy = 1 } }"#,
+        ] {
+            let err = parse(src).unwrap_err().to_string();
+            assert!(err.contains("entry 1"), "{src}: {err}");
+        }
     }
 
     #[test]
