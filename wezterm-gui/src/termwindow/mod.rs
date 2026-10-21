@@ -411,6 +411,8 @@ pub struct TermWindow {
     /// How the last fancy tab bar build fitted the tabs into its rows; None
     /// unless tab_min_width is set.
     pub tab_bar_fit: Option<render::fancy_tab_bar::TabBarFit>,
+    /// Whether `fancy_tab_bar` was built with tab group hints shown.
+    fancy_tab_bar_hinted: bool,
     /// Status text per tab bar row; index 0 is the first row, which is the
     /// only one the retro tab bar and a single-row fancy tab bar can show.
     pub right_status: Vec<String>,
@@ -744,6 +746,7 @@ impl TermWindow {
             tab_bar: TabBarState::default(),
             fancy_tab_bar: None,
             tab_bar_fit: None,
+            fancy_tab_bar_hinted: false,
             right_status: vec![String::new()],
             left_status: vec![String::new()],
             tab_groups: vec![],
@@ -2066,6 +2069,7 @@ impl TermWindow {
             }
             _ => {
                 self.close_tab_group_popup();
+                self.close_tab_group_hints();
                 return false;
             }
         };
@@ -2340,15 +2344,18 @@ impl TermWindow {
                 self.close_tab_group_popup();
             }
         }
-        // The hints close once no group folds, and once another tab is
-        // active than when they opened.
+        // The hints close once no group folds, once another tab is active
+        // than when they opened, and once an overlay covers the active tab.
         let hints_opened_on = self.get_modal().and_then(|modal| {
             modal
                 .downcast_ref::<tabgrouphints::TabGroupHints>()
                 .map(|hints| hints.opened_on)
         });
         if let Some(on) = hints_opened_on {
-            if self.tab_bar.folded().is_empty() || on != self.active_tab_id() {
+            if self.tab_bar.folded().is_empty()
+                || on != self.active_tab_id()
+                || self.active_tab_has_overlay()
+            {
                 self.close_tab_group_hints();
             }
         }

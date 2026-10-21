@@ -38,13 +38,19 @@ impl Modal for TabGroupHints {
     /// A group's hint opens that group's popup in place of the hints, and
     /// Escape closes them. A key with Cmd, Ctrl or Alt goes on to the key
     /// bindings with the hints still shown. Any other key closes them and
-    /// goes on, past the bindings, to the pane.
+    /// goes on as it would with no hints. With an overlay over the active
+    /// tab, such as quick select, the hints close and the overlay gets the
+    /// key.
     fn key_down(
         &self,
         key: KeyCode,
         mods: KeyModifiers,
         term_window: &mut TermWindow,
     ) -> anyhow::Result<bool> {
+        if term_window.active_tab_has_overlay() {
+            term_window.close_tab_group_hints();
+            return Ok(false);
+        }
         let count = term_window.tab_bar.folded().len();
         let hints = hints(&term_window.config.quick_select_alphabet, count);
         match key_on_hints(&key, mods, &hints) {
@@ -62,6 +68,18 @@ impl Modal for TabGroupHints {
             }
             HintKey::Pass => Ok(false),
         }
+    }
+
+    /// A key with Cmd, Ctrl or Alt that no key assignment took closes the
+    /// hints and goes on to the pane.
+    fn key_down_unbound(
+        &self,
+        _key: KeyCode,
+        _mods: KeyModifiers,
+        term_window: &mut TermWindow,
+    ) -> bool {
+        term_window.close_tab_group_hints();
+        true
     }
 
     fn computed_element(

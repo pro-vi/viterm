@@ -214,8 +214,8 @@ pub fn folded_ranges(groups: &[TabGroupSpec], tab_ids: &[TabId]) -> Vec<(usize, 
 
 /// The start of a folded group's item, before its label: a space, then the
 /// numbers of the first and last tabs it holds, numbered as the tab bar
-/// numbers tabs. Hints are drawn in its place.
-pub fn tab_group_prefix(tabs: &Range<usize>, show_index: bool, zero_based: bool) -> String {
+/// numbers tabs. A hint takes its cells (`hinted_title`).
+fn tab_group_prefix(tabs: &Range<usize>, show_index: bool, zero_based: bool) -> String {
     if show_index {
         format!(
             " {}\u{2013}{}: ",

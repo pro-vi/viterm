@@ -537,20 +537,13 @@ const HINT_DIM: f32 = 0.35;
 fn dim_color(colors: &TabBarColors) -> ColorAttribute {
     let fg: termwiz::color::SrgbaTuple = colors.inactive_tab().fg_color.into();
     let bg: termwiz::color::SrgbaTuple = colors.background().into();
-    let mix = |f: f32, b: f32| b + (f - b) * HINT_DIM;
-    ColorAttribute::TrueColorWithDefaultFallback(termwiz::color::SrgbaTuple(
-        mix(fg.0, bg.0),
-        mix(fg.1, bg.1),
-        mix(fg.2, bg.2),
-        1.0,
-    ))
+    ColorAttribute::TrueColorWithDefaultFallback(bg.interpolate(fg, HINT_DIM as f64))
 }
 
-/// A folded group's title with `hint` where its tab numbers were: the
-/// title's first `prefix_cells` cells, its leading space and numbers
-/// (`tab_group_prefix`), become a space, the hint in the hint colors and a
-/// colon. The tab bar's font may be proportional, so the item keeps its
-/// width by being given the unhinted title's width, not by cell count.
+/// A folded group's title with `hint` where its tab numbers were: its first
+/// `prefix_cells` cells, its leading space and numbers (`GroupTitle::prefix`),
+/// become ` <hint>: `, the hint in the hint colors. With no numbers to
+/// replace (tab numbers turned off) the hint is added and the title grows.
 fn hinted_title(
     title: &Line,
     prefix_cells: usize,
@@ -879,35 +872,35 @@ impl crate::TermWindow {
         };
         let tab_elem = |item: &TabEntry, tab_idx: usize, active: bool, max_width: f32| {
             let is_group = matches!(item.item, TabBarItem::TabGroup { .. });
-            let mut shown = item.clone();
-            let mut unhinted = None;
-            match item.item {
-                TabBarItem::TabGroup { group_idx, .. } if hinting => {
-                    if let (Some(&hint), Some(group)) =
-                        (hints.get(group_idx), self.tab_bar.folded().get(group_idx))
-                    {
-                        let prefix = crate::tabbar::tab_group_prefix(
-                            &group.tabs,
-                            self.config.show_tab_index_in_tab_bar,
-                            self.config.tab_and_split_indices_are_zero_based,
-                        );
-                        unhinted = Some(item.title.clone());
-                        shown.title = hinted_title(
+            let retitled = match item.item {
+                TabBarItem::TabGroup { group_idx, .. } if hinting => hints
+                    .get(group_idx)
+                    .zip(self.tab_bar.folded().get(group_idx))
+                    .map(|(&hint, group)| {
+                        hinted_title(
                             &item.title,
-                            termwiz::cell::unicode_column_width(&prefix, None),
+                            termwiz::cell::unicode_column_width(&group.text.prefix, None),
                             hint,
                             hint_fg,
                             hint_bg,
-                        );
-                    }
+                        )
+                    }),
+                TabBarItem::Tab { .. } if hinting => Some(dimmed_title(&item.title, dim)),
+                _ => None,
+            };
+            let hinted = is_group && retitled.is_some();
+            let mut elem = match retitled {
+                Some(title) => {
+                    let mut shown = item.clone();
+                    shown.title = title;
+                    item_to_elem(&shown)
                 }
-                TabBarItem::Tab { .. } if hinting => shown.title = dimmed_title(&item.title, dim),
-                _ => {}
-            }
-            let mut elem = item_to_elem(&shown);
-            // The hinted item keeps the width of its title as it was, cut or
-            // not, so nothing in the bar moves when the hints show.
-            if let Some(before) = &unhinted {
+                None => item_to_elem(item),
+            };
+            // The tab bar's font may be proportional, so the hinted item keeps
+            // its title's width as it was, cut or not, measured rather than
+            // counted in cells: nothing in the bar moves when the hints show.
+            if hinted {
                 if let Ok(measured) = self.compute_element(
                     &LayoutContext {
                         height: height_context,
@@ -922,7 +915,7 @@ impl crate::TermWindow {
                         gl_state: self.render_state.as_ref().unwrap(),
                         zindex: 10,
                     },
-                    &Element::with_line(&font, before, palette),
+                    &Element::with_line(&font, &item.title, palette),
                 ) {
                     elem.min_width = Some(Dimension::Pixels(measured.bounds.width()));
                 }
