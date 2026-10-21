@@ -396,6 +396,70 @@ const PLUS_BUTTON: &[Poly] = &[
     },
 ];
 
+/// How far a dimmed tab's title stays from the tab bar's background while
+/// tab group hints are shown: enough that the folded groups stand out, not so
+/// little that the other titles cannot be read.
+const HINT_DIM: f32 = 0.35;
+
+/// The color of a dimmed tab's title: the inactive tabs' text color, moved
+/// toward the tab bar's background until `HINT_DIM` of it is left.
+fn dim_color(colors: &TabBarColors) -> ColorAttribute {
+    let fg: termwiz::color::SrgbaTuple = colors.inactive_tab().fg_color.into();
+    let bg: termwiz::color::SrgbaTuple = colors.background().into();
+    let mix = |f: f32, b: f32| b + (f - b) * HINT_DIM;
+    ColorAttribute::TrueColorWithDefaultFallback(termwiz::color::SrgbaTuple(
+        mix(fg.0, bg.0),
+        mix(fg.1, bg.1),
+        mix(fg.2, bg.2),
+        1.0,
+    ))
+}
+
+/// A folded group's title with `hint` where its tab numbers were: the
+/// title's first `prefix_cells` cells, its leading space and numbers
+/// (`tab_group_prefix`), become a space, the hint in the hint colors and a
+/// colon. The tab bar's font may be proportional, so the item keeps its
+/// width by being given the unhinted title's width, not by cell count.
+fn hinted_title(
+    title: &Line,
+    prefix_cells: usize,
+    hint: char,
+    fg: ColorAttribute,
+    bg: ColorAttribute,
+) -> Line {
+    let lead = title
+        .get_cell(0)
+        .map(|cell| cell.attrs().clone())
+        .unwrap_or_default();
+    let mut hint_attrs = lead.clone();
+    hint_attrs
+        .set_foreground(fg)
+        .set_background(bg)
+        .set_intensity(termwiz::cell::Intensity::Bold);
+    let len = title.len();
+    let prefix = prefix_cells.clamp(1, len.max(1));
+    let seq = termwiz::surface::SEQ_ZERO;
+    let mut line = Line::from_text(" ", &lead, seq, None);
+    line.append_line(
+        Line::from_text(&hint.to_string(), &hint_attrs, seq, None),
+        seq,
+    );
+    line.append_line(Line::from_text(": ", &lead, seq, None), seq);
+    line.append_line(title.columns_as_line(prefix..len), seq);
+    line
+}
+
+/// A tab's title in `dim`, without the background its own title gives it.
+fn dimmed_title(title: &Line, dim: ColorAttribute) -> Line {
+    let mut out = title.clone();
+    for cell in out.cells_mut_for_attr_changes_only() {
+        let attrs = cell.attrs_mut();
+        attrs.set_foreground(dim);
+        attrs.set_background(ColorAttribute::Default);
+    }
+    out
+}
+
 impl crate::TermWindow {
     pub fn invalidate_fancy_tab_bar(&mut self) {
         self.fancy_tab_bar.take();
@@ -418,6 +482,54 @@ impl crate::TermWindow {
             .and_then(|c| c.tab_bar.as_ref())
             .cloned()
             .unwrap_or_else(TabBarColors::default);
+
+        // While the tab group hints are shown, each folded group's item reads
+        // its hint where its tab numbers were, and every other tab is dimmed.
+        // A group's title as it was is kept beside it, so its item can be
+        // given that title's width and nothing in the bar moves.
+        let hinted_items;
+        let mut unhinted: Vec<Option<Line>> = vec![];
+        let items = if self.tab_group_hints_open() {
+            let folded = self.tab_bar.folded();
+            let hints = tabgrouppopup::hints(&self.config.quick_select_alphabet, folded.len());
+            let (hint_fg, hint_bg) = tabgrouppopup::hint_attributes(&self.config);
+            let dim = dim_color(&colors);
+            hinted_items = items
+                .iter()
+                .map(|item| {
+                    let mut item = item.clone();
+                    let mut before = None;
+                    match item.item {
+                        TabBarItem::TabGroup { group_idx, .. } => {
+                            if let (Some(&hint), Some(group)) =
+                                (hints.get(group_idx), folded.get(group_idx))
+                            {
+                                let prefix = crate::tabbar::tab_group_prefix(
+                                    &group.tabs,
+                                    self.config.show_tab_index_in_tab_bar,
+                                    self.config.tab_and_split_indices_are_zero_based,
+                                );
+                                before = Some(item.title.clone());
+                                item.title = hinted_title(
+                                    &item.title,
+                                    termwiz::cell::unicode_column_width(&prefix, None),
+                                    hint,
+                                    hint_fg,
+                                    hint_bg,
+                                );
+                            }
+                        }
+                        TabBarItem::Tab { .. } => item.title = dimmed_title(&item.title, dim),
+                        _ => {}
+                    }
+                    unhinted.push(before);
+                    item
+                })
+                .collect::<Vec<TabEntry>>();
+            &hinted_items[..]
+        } else {
+            items
+        };
 
         let mut left_status = vec![];
         let mut left_eles = vec![];
@@ -657,7 +769,7 @@ impl crate::TermWindow {
             [edge, edge.mul_alpha(0.55)]
         };
 
-        for item in items {
+        for (item_idx, item) in items.iter().enumerate() {
             match item.item {
                 TabBarItem::LeftStatus => left_status.push(item_to_elem(item)),
                 TabBarItem::None | TabBarItem::RightStatus => right_eles.push(item_to_elem(item)),
@@ -679,6 +791,25 @@ impl crate::TermWindow {
                         _ => unreachable!(),
                     };
                     let mut elem = item_to_elem(item);
+                    if let Some(Some(before)) = unhinted.get(item_idx) {
+                        let measured = self.compute_element(
+                            &LayoutContext {
+                                height: height_context,
+                                width: width_context,
+                                bounds: euclid::rect(
+                                    0.,
+                                    0.,
+                                    self.dimensions.pixel_width as f32,
+                                    tab_bar_height,
+                                ),
+                                metrics: &metrics,
+                                gl_state: self.render_state.as_ref().unwrap(),
+                                zindex: 10,
+                            },
+                            &Element::with_line(&font, before, palette),
+                        )?;
+                        elem.min_width = Some(Dimension::Pixels(measured.bounds.width()));
+                    }
                     elem.max_width = Some(Dimension::Pixels(max_tab_width));
                     elem.content = match elem.content {
                         ElementContent::Text(_) => unreachable!(),
@@ -1223,6 +1354,74 @@ mod test {
         );
         assert_eq!(look.vertical_align(), VerticalAlign::Middle);
         assert_eq!(pixels(look.margin()), sides(0., -3., 0., 0.));
+    }
+
+    fn text(line: &Line) -> String {
+        (0..line.len())
+            .filter_map(|i| line.get_cell(i).map(|c| c.str().to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn a_hint_takes_the_place_of_a_groups_numbers() {
+        let seq = termwiz::surface::SEQ_ZERO;
+        let plain = termwiz::cell::CellAttributes::default();
+        let title = Line::from_text(" 3\u{2013}5: philemon ", &plain, seq, None);
+        let fg = ColorAttribute::PaletteIndex(0);
+        let bg = ColorAttribute::PaletteIndex(1);
+        let hinted = hinted_title(&title, 6, 's', fg, bg);
+        assert_eq!(text(&hinted), " s: philemon ");
+        let hint = hinted.get_cell(1).unwrap();
+        assert_eq!(
+            (hint.attrs().foreground(), hint.attrs().background()),
+            (fg, bg)
+        );
+        assert_eq!(
+            hinted.get_cell(0).unwrap().attrs().background(),
+            ColorAttribute::Default
+        );
+    }
+
+    #[test]
+    fn a_hint_with_no_numbers_to_replace_is_added_in_front_of_the_label() {
+        let seq = termwiz::surface::SEQ_ZERO;
+        let plain = termwiz::cell::CellAttributes::default();
+        let title = Line::from_text(" philemon ", &plain, seq, None);
+        let hinted = hinted_title(
+            &title,
+            1,
+            'a',
+            ColorAttribute::Default,
+            ColorAttribute::Default,
+        );
+        assert_eq!(text(&hinted), " a: philemon ");
+    }
+
+    #[test]
+    fn a_dimmed_title_loses_its_own_background_and_takes_the_dim_color() {
+        let seq = termwiz::surface::SEQ_ZERO;
+        let tint = ColorAttribute::PaletteIndex(2);
+        let mut attrs = termwiz::cell::CellAttributes::default();
+        attrs.set_background(tint);
+        let title = Line::from_text(" 7: braid ", &attrs, seq, None);
+        let dim = ColorAttribute::PaletteIndex(8);
+        let dimmed = dimmed_title(&title, dim);
+        assert_eq!(text(&dimmed), " 7: braid ");
+        for i in 0..dimmed.len() {
+            let cell = dimmed.get_cell(i).unwrap();
+            assert_eq!(cell.attrs().foreground(), dim);
+            assert_eq!(cell.attrs().background(), ColorAttribute::Default);
+        }
+    }
+
+    #[test]
+    fn hint_letters_follow_quick_select_alphabet() {
+        assert_eq!(
+            tabgrouppopup::hints("ASdf", 3)
+                .into_iter()
+                .collect::<String>(),
+            "asd"
+        );
     }
 
     #[test]

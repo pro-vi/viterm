@@ -110,6 +110,14 @@ impl UserData for GuiWin {
                 .map_err(|e| anyhow::anyhow!("{:#}", e))
                 .map_err(luaerr)
         });
+        methods.add_async_method("show_tab_group_hints", |_, this, _: ()| async move {
+            let (tx, rx) = smol::channel::bounded(1);
+            this.window.notify(TermWindowNotif::ShowTabGroupHints(tx));
+            rx.recv()
+                .await
+                .map_err(|e| anyhow::anyhow!("{:#}", e))
+                .map_err(luaerr)
+        });
         methods.add_async_method(
             "open_tab_group_popup",
             |_, this, tab_index: mlua::Value| async move {

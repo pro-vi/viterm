@@ -152,18 +152,25 @@ pub fn key_on_hints(key: &KeyCode, mods: KeyModifiers, hints: &[char]) -> HintKe
     }
 }
 
-/// The colors a hint is drawn in: quick select's label colors, with the
-/// fallback quick select uses when they are not set.
-pub fn hint_colors(config: &ConfigHandle, palette: &ColorPalette) -> (LinearRgba, LinearRgba) {
+/// The foreground and background a hint is drawn in: quick select's label
+/// colors, with the fallback quick select uses when they are not set.
+pub fn hint_attributes(config: &ConfigHandle) -> (ColorAttribute, ColorAttribute) {
     let colors = &config.resolved_palette;
-    let fg: ColorAttribute = colors
-        .quick_select_label_fg
-        .unwrap_or(ColorSpec::from(AnsiColor::Olive))
-        .into();
-    let bg: ColorAttribute = colors
-        .quick_select_label_bg
-        .unwrap_or(ColorSpec::from(AnsiColor::Black))
-        .into();
+    (
+        colors
+            .quick_select_label_fg
+            .unwrap_or(ColorSpec::from(AnsiColor::Olive))
+            .into(),
+        colors
+            .quick_select_label_bg
+            .unwrap_or(ColorSpec::from(AnsiColor::Black))
+            .into(),
+    )
+}
+
+/// `hint_attributes`, resolved for drawing an element.
+pub fn hint_colors(config: &ConfigHandle, palette: &ColorPalette) -> (LinearRgba, LinearRgba) {
+    let (fg, bg) = hint_attributes(config);
     (
         palette.resolve_fg(fg).to_linear(),
         palette.resolve_bg(bg).to_linear(),

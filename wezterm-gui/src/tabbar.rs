@@ -120,20 +120,25 @@ pub fn folded_ranges(groups: &[TabGroupSpec], tab_ids: &[TabId]) -> Vec<(usize, 
     out
 }
 
-/// The text of a folded group's item: the numbers of the first and last tabs
-/// it holds, numbered as the tab bar numbers tabs, then its label.
-fn tab_group_text(tabs: &Range<usize>, label: &str, show_index: bool, zero_based: bool) -> String {
+/// The start of a folded group's item, before its label: a space, then the
+/// numbers of the first and last tabs it holds, numbered as the tab bar
+/// numbers tabs. Hints are drawn in its place.
+pub fn tab_group_prefix(tabs: &Range<usize>, show_index: bool, zero_based: bool) -> String {
     if show_index {
         let base = if zero_based { 0 } else { 1 };
-        format!(
-            " {}\u{2013}{}: {} ",
-            tabs.start + base,
-            tabs.end - 1 + base,
-            label
-        )
+        format!(" {}\u{2013}{}: ", tabs.start + base, tabs.end - 1 + base)
     } else {
-        format!(" {} ", label)
+        " ".to_string()
     }
+}
+
+/// The text of a folded group's item: its prefix, then its label.
+fn tab_group_text(tabs: &Range<usize>, label: &str, show_index: bool, zero_based: bool) -> String {
+    format!(
+        "{}{} ",
+        tab_group_prefix(tabs, show_index, zero_based),
+        label
+    )
 }
 
 #[derive(Clone, Debug, PartialEq)]
