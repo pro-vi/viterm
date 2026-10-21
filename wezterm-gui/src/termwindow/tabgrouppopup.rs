@@ -55,13 +55,19 @@ impl Modal for TabGroupPopup {
     /// A tab's hint activates that tab and Escape closes the popup. A key
     /// with Cmd, Ctrl or Alt goes on to the key bindings with the popup
     /// open, so a binding such as ActivateTab still works. Any other key
-    /// closes the popup and goes on, past the bindings, to the pane.
+    /// closes the popup and goes on as it would with no popup. With an
+    /// overlay over the active tab, such as quick select, the popup closes
+    /// and the overlay gets the key.
     fn key_down(
         &self,
         key: KeyCode,
         mods: KeyModifiers,
         term_window: &mut TermWindow,
     ) -> anyhow::Result<bool> {
+        if term_window.active_tab_has_overlay() {
+            term_window.close_tab_group_popup();
+            return Ok(false);
+        }
         let tabs = term_window
             .tab_bar
             .folded_group_of(self.tab_id)
@@ -86,6 +92,18 @@ impl Modal for TabGroupPopup {
             }
             HintKey::Pass => Ok(false),
         }
+    }
+
+    /// A key with Cmd, Ctrl or Alt that no key assignment took closes the
+    /// popup and goes on to the pane.
+    fn key_down_unbound(
+        &self,
+        _key: KeyCode,
+        _mods: KeyModifiers,
+        term_window: &mut TermWindow,
+    ) -> bool {
+        term_window.close_tab_group_popup();
+        true
     }
 
     fn computed_element(
@@ -119,22 +137,23 @@ pub fn hints(alphabet: &str, count: usize) -> Vec<char> {
     out
 }
 
-/// What a key press does while hints are drawn, by the key and its
-/// modifiers. `hints` is the character of each item, in order.
+/// What a key press does while hints are drawn.
 #[derive(Debug, PartialEq, Eq)]
 pub enum HintKey {
     /// The key is item `k`'s hint.
     Pick(usize),
     /// Escape: close, and the key goes no further.
     Close,
-    /// Any other key without Cmd, Ctrl or Alt: close, and the key goes on to
-    /// the pane.
+    /// Any other key without Cmd, Ctrl or Alt: close, and the key goes on as
+    /// it would with nothing open.
     Leave,
     /// A key with Cmd, Ctrl or Alt, or a modifier key on its own: stay open,
     /// and the key goes on to the key bindings.
     Pass,
 }
 
+/// How `key` with `mods` is read while hints are drawn, `hints` being the
+/// character of each item, in order.
 pub fn key_on_hints(key: &KeyCode, mods: KeyModifiers, hints: &[char]) -> HintKey {
     if key.is_modifier() {
         return HintKey::Pass;
