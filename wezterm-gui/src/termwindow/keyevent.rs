@@ -665,10 +665,9 @@ impl super::TermWindow {
                 }
 
                 if let Some(modal) = self.get_modal() {
-                    if window_key.key_is_down {
-                        modal.key_down(key, modifiers, self).ok();
+                    if !(window_key.key_is_down && modal.key_down_unbound(key, modifiers, self)) {
+                        return;
                     }
-                    return;
                 }
 
                 let res = if let Some(encoded) = self.encode_win32_input(&pane, &window_key) {

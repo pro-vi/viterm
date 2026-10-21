@@ -1922,41 +1922,53 @@ impl TermWindow {
         }
     }
 
-    /// The id of this window's active tab.
     fn active_tab_id(&self) -> Option<mux::tab::TabId> {
         Mux::get()
             .get_window(self.mux_window_id)
             .and_then(|window| window.get_active_tab().map(|tab| tab.tab_id()))
     }
 
+    /// Whether an overlay, such as quick select or a prompt, is over this
+    /// window's active tab.
+    pub fn active_tab_has_overlay(&self) -> bool {
+        Mux::get()
+            .get_active_tab_for_window(self.mux_window_id)
+            .map_or(false, |tab| self.tab_state(tab.tab_id()).overlay.is_some())
+    }
+
     /// What window:open_tab_group_popup does: opens the popup of the folded
     /// group holding the tab at `tab_idx`, with that tab marked, replacing a
-    /// popup another group has open. False, with nothing changed, when that
-    /// tab is in no folded group, when its group's popup is already open, or
-    /// when another kind of modal is open.
+    /// popup another group has open. False when that tab is in no folded
+    /// group or its group's popup is already open, closing an open popup,
+    /// since the caller then goes to the tab; false with nothing changed when
+    /// another kind of modal is open.
     fn open_tab_group_popup_for_tab(&mut self, tab_idx: usize) -> bool {
         if self.get_modal().is_some() && self.open_popup_tab().is_none() {
             return false;
         }
-        let Some(group) = self
+        let group = self
             .tab_bar
             .folded()
             .iter()
-            .find(|group| group.tabs.contains(&tab_idx))
-        else {
-            return false;
+            .find(|group| group.tabs.contains(&tab_idx));
+        let marked = match group {
+            Some(group)
+                if !self
+                    .open_popup_tab()
+                    .map_or(false, |open| group.ids.contains(&open)) =>
+            {
+                group.ids[tab_idx - group.tabs.start]
+            }
+            _ => {
+                self.close_tab_group_popup();
+                return false;
+            }
         };
-        if self
-            .open_popup_tab()
-            .map_or(false, |open| group.ids.contains(&open))
-        {
-            return false;
-        }
-        let marked = group.ids[tab_idx - group.tabs.start];
-        let tab_id = group.ids[0];
+        // The popup names its group by the marked tab, so the mark is in the
+        // group it lists however the tabs regroup.
         let opened_on = self.active_tab_id();
         self.set_modal(Rc::new(tabgrouppopup::TabGroupPopup::new(
-            tab_id,
+            marked,
             Some(marked),
             opened_on,
         )));
@@ -2172,7 +2184,8 @@ impl TermWindow {
             }
         }
         // A popup lists one group's tabs; it closes once that group no longer
-        // folds, and once another tab is active than when it opened.
+        // folds, once another tab is active than when it opened, and once an
+        // overlay covers the active tab.
         if let Some(open) = self.open_popup_tab() {
             let opened_on = self.get_modal().and_then(|modal| {
                 modal
@@ -2181,6 +2194,7 @@ impl TermWindow {
             });
             if self.tab_bar.folded_group_of(open).is_none()
                 || opened_on.map_or(false, |on| on != self.active_tab_id())
+                || self.active_tab_has_overlay()
             {
                 self.close_tab_group_popup();
             }
