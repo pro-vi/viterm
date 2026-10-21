@@ -13,12 +13,18 @@ have there, in a box of the tab bar's color with the corners of the tab bar's
 tab shape, next to the item and over the bottom (or top) lines of the panes,
 with a point aimed at the item. The tab bar and the panes do not move.
 
-Clicking one of its tabs activates that tab and closes the popup. Escape, a
-click outside it, or a second click on the group's item closes it; a click in
-the tab bar closes it and then does what it would have done. While it is open
-it takes the keyboard as the command palette does: a key with a key assignment
-still performs it, so `ActivateTab` reaches any tab, and other keys do nothing.
-It closes by itself when its group stops being drawn as one item.
+Each of its tabs is led by a hint: a letter from
+[quick_select_alphabet](../config/quick_select_alphabet.md), in the order of
+the tabs, drawn in the `quick_select_label_fg` and `quick_select_label_bg`
+colors. The tab's own title keeps its number.
+
+Clicking one of its tabs, or pressing its hint, activates that tab and closes
+the popup. Escape, a click outside it, or a second click on the group's item
+closes it; a click in the tab bar closes it and then does what it would have
+done. A key with Cmd, Ctrl or Alt still performs its key assignment with the
+popup open, so `ActivateTab` reaches any tab. Any other key closes the popup
+and goes on to the pane. It closes by itself when its group stops being drawn
+as one item, and when another tab becomes active.
 
 Only the fancy tab bar (`use_fancy_tab_bar = true`) draws a group as one item,
 so with the retro tab bar, or with the tab bar hidden, nothing opens.

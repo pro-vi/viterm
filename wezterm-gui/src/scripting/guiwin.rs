@@ -117,6 +117,19 @@ impl UserData for GuiWin {
                 .map_err(|e| anyhow::anyhow!("{:#}", e))
                 .map_err(luaerr)
         });
+        methods.add_async_method(
+            "open_tab_group_popup",
+            |_, this, tab_index: mlua::Value| async move {
+                let tab_index = parse_tab_index("open_tab_group_popup", tab_index)?;
+                let (tx, rx) = smol::channel::bounded(1);
+                this.window
+                    .notify(TermWindowNotif::OpenTabGroupPopup(tab_index, tx));
+                rx.recv()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{:#}", e))
+                    .map_err(luaerr)
+            },
+        );
         methods.add_method("set_tab_groups", |_, this, groups: mlua::Value| {
             let groups = parse_tab_groups(groups)?;
             this.window.notify(TermWindowNotif::SetTabGroups(groups));
@@ -395,6 +408,18 @@ impl UserData for GuiWin {
     }
 }
 
+/// A 0-based tab index, as `ActivateTab` takes it. Anything that is not a
+/// non-negative whole number is an error that names the method.
+fn parse_tab_index(method: &str, value: mlua::Value) -> mlua::Result<usize> {
+    match value {
+        mlua::Value::Integer(i) if i >= 0 => Ok(i as usize),
+        mlua::Value::Number(n) if n >= 0. && n.fract() == 0. => Ok(n as usize),
+        _ => Err(mlua::Error::external(format!(
+            "{method}: tab_index must be a whole number, 0 or more"
+        ))),
+    }
+}
+
 /// The groups `window:set_tab_groups` was given: a list of
 /// `{ tabs = {tab_id, ...}, label = "..." }`. Anything else is an error that
 /// names the entry, so a mistake shows in the log instead of as a tab bar
@@ -491,6 +516,27 @@ mod test {
         let lua = mlua::Lua::new();
         let value: mlua::Value = lua.load(src).eval().unwrap();
         parse_tab_groups(value)
+    }
+
+    fn index(src: &str) -> mlua::Result<usize> {
+        let lua = mlua::Lua::new();
+        let value: mlua::Value = lua.load(src).eval().unwrap();
+        parse_tab_index("open_tab_group_popup", value)
+    }
+
+    #[test]
+    fn a_tab_index_is_a_whole_number_from_zero() {
+        assert_eq!(index("0").unwrap(), 0);
+        assert_eq!(index("7").unwrap(), 7);
+        assert_eq!(index("7.0").unwrap(), 7);
+    }
+
+    #[test]
+    fn a_tab_index_that_is_negative_fractional_or_not_a_number_is_refused() {
+        for src in ["-1", "1.5", "'3'", "nil", "{}"] {
+            let err = index(src).unwrap_err().to_string();
+            assert!(err.contains("open_tab_group_popup"), "{src}: {err}");
+        }
     }
 
     #[test]
