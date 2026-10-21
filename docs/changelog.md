@@ -87,6 +87,12 @@ As features stabilize some brief notes about them will accumulate here.
   shape, spacing and active-tab marker of the fancy tab bar's tabs, and
   whether a background color set by `format-tab-title` fills the tab or
   colors its title.
+* Kitty graphics protocol: support for [Unicode
+  placeholders](https://sw.kovidgoyal.net/kitty/graphics-protocol/#unicode-placeholders):
+  virtual placements (`U=1`) and `U+10EEEE` placeholder cells. Programs that
+  position images through the text grid (eg: `textual-image`, `ratatui-image`)
+  now display them in the right place instead of at the cursor position, and
+  the placeholder character is no longer passed through to font rendering.
 * [command_palette_line_height](config/lua/config/command_palette_line_height.md)
   option to scale the vertical spacing of rows in the command palette,
   independently of [line_height](config/lua/config/line_height.md) which is for terminal cells only.
