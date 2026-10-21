@@ -1460,12 +1460,12 @@ impl crate::TermWindow {
                 );
                 let point_height = (cell_height * 0.5).round().max(4.);
                 let point_width = (point_height * 1.6).round();
-                let at_bottom = self.config.tab_bar_at_bottom;
-                let origin = tabgrouppopup::popup_origin(
+                let (origin, above) = tabgrouppopup::popup_origin(
                     item,
                     boxed.bounds.size.to_untyped(),
                     window_width,
-                    at_bottom,
+                    computed.bounds.to_untyped(),
+                    self.config.tab_bar_at_bottom,
                     point_height,
                     4.,
                 );
@@ -1475,7 +1475,7 @@ impl crate::TermWindow {
                     ElementContent::Poly {
                         line_width: metrics.underline_height.max(1),
                         poly: SizedPoly {
-                            poly: if at_bottom {
+                            poly: if above {
                                 TAB_GROUP_POINT_DOWN
                             } else {
                                 TAB_GROUP_POINT_UP
@@ -1498,7 +1498,7 @@ impl crate::TermWindow {
                     point_width,
                     look.corner_x.max(cell_height / 2.),
                 );
-                let point_y = if at_bottom {
+                let point_y = if above {
                     origin.y + boxed.bounds.height() - 1.
                 } else {
                     origin.y - point_height + 1.
