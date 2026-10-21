@@ -29,10 +29,11 @@ bar numbers tabs too, whatever a `format-tab-title` handler writes in the
 tabs' own titles. When the item has less room than its text needs, the label
 is shortened first, down to one character and an ellipsis; then the busy text
 is left out; then marks are left out from the end, and `+n` says how many.
-Its tab numbers, and any mark it shows, are never cut. It is drawn as a tab
+Its tab numbers, and the marks it shows, are kept while the item has room
+for them; with less room than that, it is cut from its end like any tab. It is drawn as a tab
 with layers showing past its trailing
 edge, and the way the active tab is drawn when it holds the active tab.
-Clicking it opens a popup over the panes, next to the item, that lists the
+Clicking it opens a popup next to the item that lists the
 group's tabs drawn as the tab bar draws tabs; see
 [toggle_tab_group_popup](toggle_tab_group_popup.md).
 

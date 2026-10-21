@@ -354,8 +354,9 @@ impl UserData for GuiWin {
 }
 
 /// The groups `window:set_tab_groups` was given: a list of
-/// `{ tabs = {tab_id, ...}, label = "..." }`. Anything else is an error that
-/// names the entry, so a mistake shows in the log instead of as a tab bar
+/// `{ tabs = {tab_id, ...}, label = "..." }`, each with optional `marks`
+/// and `busy`. Anything else is an error that names the entry, so a
+/// mistake shows in the log instead of as a tab bar
 /// that silently stays as it was.
 fn parse_tab_groups(groups: mlua::Value) -> mlua::Result<Vec<crate::tabbar::TabGroupSpec>> {
     let fail = |msg: String| mlua::Error::external(format!("set_tab_groups: {msg}"));
