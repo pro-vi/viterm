@@ -2,7 +2,7 @@
 title: Peek into a folded tab group, then go
 objective: The owner can look inside any folded project from the keyboard without leaving the tab they are on or clearing a finished mark, then go to the tab they picked; a folded project says which of its tabs need them
 type: feat
-status: active
+status: completed
 builder: cold
 date: 2026-10-21
 origin: conversation (slots + tab folders mission, 2026-10-21); spec bootstrap `docs/vantage/tab-groups-keyboard.md` (cells and decisions settled by the owner); drawn flow bootstrap `.research/slot-tabs/ui-sketch-tab-peek.html` (its `step()` is the reference model, hint letters drawn as option B of `ui-sketch-tab-hints.html`)
