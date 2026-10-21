@@ -1,5 +1,5 @@
 use crate::customglyph::*;
-use crate::tabbar::{TabBarItem, TabEntry};
+use crate::tabbar::{FoldedTabGroup, TabBarItem, TabEntry};
 use crate::termwindow::box_model::*;
 use crate::termwindow::render::corners::*;
 
@@ -393,9 +393,23 @@ pub struct TabBarFit {
 }
 
 /// The tab with its title cut to `cells` cells, the last two being an
-/// ellipsis and a space. A title that already fits is returned unchanged.
-fn cut_title(item: &TabEntry, cells: usize) -> TabEntry {
+/// ellipsis and a space. A title that already fits is returned unchanged. A
+/// folded tab group's item is cut by `GroupTitle::fit`, which shortens its
+/// label before any of its marks, and only what that cannot fit is cut here.
+fn cut_title(item: &TabEntry, cells: usize, folded: &[FoldedTabGroup]) -> TabEntry {
     let mut item = item.clone();
+    if let TabBarItem::TabGroup { group_idx, .. } = item.item {
+        if let Some(group) = folded.get(group_idx) {
+            if item.title.len() > cells {
+                let attrs = item
+                    .title
+                    .get_cell(0)
+                    .map(|cell| cell.attrs().clone())
+                    .unwrap_or_else(CellAttributes::default);
+                item.title = Line::from_text(&group.text.fit(cells), &attrs, SEQ_ZERO, None);
+            }
+        }
+    }
     if item.title.len() > cells {
         let mut keep = cells.saturating_sub(2).max(1);
         // Do not split a double-width character from the cell after it.
@@ -1011,8 +1025,12 @@ impl crate::TermWindow {
                         let width = match measured.get(&(i, cells)) {
                             Some(width) => *width,
                             None => {
-                                let ele =
-                                    tab_elem(&cut_title(item, cells), *tab_idx, *active, f32::MAX);
+                                let ele = tab_elem(
+                                    &cut_title(item, cells, self.tab_bar.folded()),
+                                    *tab_idx,
+                                    *active,
+                                    f32::MAX,
+                                );
                                 let width = measure(ele)?;
                                 measured.insert((i, cells), width);
                                 width
@@ -1046,7 +1064,7 @@ impl crate::TermWindow {
                     }
                     for i in range.clone() {
                         let (item, tab_idx, active) = tab_items[i];
-                        let item = cut_title(item, title_width);
+                        let item = cut_title(item, title_width, self.tab_bar.folded());
                         mine.push(tab_elem(&item, tab_idx, active, caps[row].max(0.)));
                     }
                     if new_tab_row == Some(row) {
