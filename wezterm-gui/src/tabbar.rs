@@ -12,7 +12,7 @@ use termwiz::escape::csi::Sgr;
 use termwiz::escape::parser::Parser;
 use termwiz::escape::{Action, ControlCode, CSI};
 use termwiz::surface::SEQ_ZERO;
-use termwiz_funcs::{format_as_escapes, FormatColor, FormatItem};
+use termwiz_funcs::{format_as_escapes, truncate_right, FormatColor, FormatItem};
 use wezterm_term::{Line, Progress};
 use window::{IntegratedTitleButton, IntegratedTitleButtonAlignment, IntegratedTitleButtonStyle};
 
@@ -117,30 +117,24 @@ impl GroupTitle {
     /// The text in at most `cells` cells, cut so that the marks go last: the
     /// label shortens first, down to one character and an ellipsis; then the
     /// busy text goes; then marks go from the end, `+n` saying how many.
-    /// The numbers are never cut, and a mark is never cut through, so the
-    /// result can be wider than `cells` when not even that fits.
+    /// The result is wider than `cells` when even the numbers, the shortest
+    /// label and `+n` do not fit; a caller that must fit then cuts it.
     pub fn fit(&self, cells: usize) -> String {
         let width = |s: &str| unicode_column_width(s, None);
         let full = self.text();
         if width(&full) <= cells {
             return full;
         }
-        let shortest = shorten(&self.label, 2);
-        let with = |label: &str, marks: usize, busy: bool| self.compose(label, marks, busy);
-        let rest = width(&with("", self.marks.len(), true));
+        let rest = width(&self.compose("", self.marks.len(), true));
         if rest + 2 <= cells {
-            return with(&shorten(&self.label, cells - rest), self.marks.len(), true);
+            return self.compose(&shorten(&self.label, cells - rest), self.marks.len(), true);
         }
-        if width(&with(&shortest, self.marks.len(), false)) <= cells {
-            return with(&shortest, self.marks.len(), false);
-        }
-        for marks in (0..self.marks.len()).rev() {
-            let text = with(&shortest, marks, false);
-            if width(&text) <= cells {
-                return text;
-            }
-        }
-        with(&shortest, 0, false)
+        let shortest = shorten(&self.label, 2);
+        (0..=self.marks.len())
+            .rev()
+            .map(|marks| self.compose(&shortest, marks, false))
+            .find(|text| width(text) <= cells)
+            .unwrap_or_else(|| self.compose(&shortest, 0, false))
     }
 }
 
@@ -149,18 +143,7 @@ fn shorten(label: &str, cells: usize) -> String {
     if unicode_column_width(label, None) <= cells {
         return label.to_string();
     }
-    let mut out = String::new();
-    let mut used = 0;
-    for c in label.chars() {
-        let w = unicode_column_width(&c.to_string(), None);
-        if used + w + 1 > cells {
-            break;
-        }
-        out.push(c);
-        used += w;
-    }
-    out.push('\u{2026}');
-    out
+    format!("{}\u{2026}", truncate_right(label, cells.saturating_sub(1)))
 }
 
 /// A group drawn as one item: the tabs it holds, in tab order, each with the
@@ -890,25 +873,16 @@ impl TabBarState {
                 } else {
                     &inactive_cell_attrs
                 };
-                let mut group_line = parse_status_text(
-                    &text,
-                    if config.use_fancy_tab_bar {
-                        CellAttributes::default()
-                    } else {
-                        cell_attrs.clone()
-                    },
-                );
+                let base_attrs = if config.use_fancy_tab_bar {
+                    CellAttributes::default()
+                } else {
+                    cell_attrs.clone()
+                };
+                let mut group_line = parse_status_text(&text, base_attrs.clone());
                 let title = group_line.clone();
                 if group_line.len() > tab_width_max {
                     // Cut so that the marks go last (`GroupTitle::fit`).
-                    group_line = parse_status_text(
-                        &group_text.fit(tab_width_max),
-                        if config.use_fancy_tab_bar {
-                            CellAttributes::default()
-                        } else {
-                            cell_attrs.clone()
-                        },
-                    );
+                    group_line = parse_status_text(&group_text.fit(tab_width_max), base_attrs);
                     if group_line.len() > tab_width_max {
                         group_line.resize(tab_width_max, SEQ_ZERO);
                     }
