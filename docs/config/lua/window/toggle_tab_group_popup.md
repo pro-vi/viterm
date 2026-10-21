@@ -22,9 +22,12 @@ Clicking one of its tabs, or pressing its hint, activates that tab and closes
 the popup. Escape, a click outside it, or a second click on the group's item
 closes it; a click in the tab bar closes it and then does what it would have
 done. A key with Cmd, Ctrl or Alt still performs its key assignment with the
-popup open, so `ActivateTab` reaches any tab. Any other key closes the popup
-and goes on to the pane. It closes by itself when its group stops being drawn
-as one item, and when another tab becomes active.
+popup open, so `ActivateTab` reaches any tab; one with no key assignment
+closes the popup and goes on to the pane. Any other key closes the popup and
+goes on as it would with no popup: to its key assignment if it has one, else
+to the pane. It closes by itself when its group stops being drawn as one
+item, when another tab becomes active, and when an overlay such as quick
+select opens over the active tab.
 
 Only the fancy tab bar (`use_fancy_tab_bar = true`) draws a group as one item,
 so with the retro tab bar, or with the tab bar hidden, nothing opens.

@@ -8,20 +8,19 @@ any tab. `tab_index` counts from 0, as [ActivateTab](../keyassignment/ActivateTa
 does.
 
 Returns `true` when it opened a popup. It replaces a popup that another group
-has open. Returns `false`, and changes nothing, when:
-
-* the tab at `tab_index` is in no group drawn as one item, or there is no tab
-  at that index;
-* that tab's group already has its popup open;
-* another modal, such as the command palette, is open.
+has open. Returns `false` when the tab at `tab_index` is in no group drawn as
+one item, when there is no tab at that index, or when that tab's group already
+has its popup open; it then closes any open popup, since the caller goes to
+the tab. Returns `false` and changes nothing when another modal, such as the
+command palette, is open.
 
 A `tab_index` that is not a whole number of 0 or more is an error.
 
 The popup is the one [toggle_tab_group_popup](toggle_tab_group_popup.md)
-describes. The marked tab is drawn with the active tab's marker, in the
+describes. The marked tab is drawn inside a ring in the
 `quick_select_label_bg` color.
 
-`false` means the tab is already in view, so a key binding can go to the tab
+`false` means no popup was opened, so a key binding can go to the tab
 instead. Here, a number for a tab inside a folded group shows its group first,
 and the same number again goes to it:
 
