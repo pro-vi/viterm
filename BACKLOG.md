@@ -124,6 +124,20 @@ Named `tabbar-title-memo` until 2026-10-02; plans written before then use that n
 - needs: `unit/tab-order-over-protocol`
 - why: While a tab move made in this client is in flight, a pane list's order is skipped but its new tabs are still added, at the end of their local window (`process_pane_list` appends with `push_tab`). A move sent before the skipped order is read again names every tab of the window, that new tab last, and a server that takes tab orders puts it there: another client's placement of the tab is undone, and every GUI then shows it last. Found by the harden review's fourth gate (invariance) on 2026-10-20 at d63a62ae4. The narrow change: a tab a list adds to an existing local window goes after the tab before it in the list, not at the end; an older server always appends, so nothing changes against one. Test pair: with a move in flight, a list that adds a tab at the front, then a second move, must not send the new tab last; with no move in flight the list's order is shown as now. Signal: none, since nothing records a request that moves a tab no user moved. Promote when a tab another GUI placed is seen at the end after a move here, or when the list application is next changed.
 
+### `tab-group-hint-key-repeat`
+
+- side: gui
+- state: proposed
+- needs: `unit/tab-group-hints`
+- why: `Modal::key_down` is not told when a key is a repeat. A hint letter held past the key-repeat delay opens group k's popup on the press, and the repeat then picks the popup's tab with the same letter, because both hint lists start at the alphabet's first letter. Found by the gate review of 2026-10-21 (build at 8c390b4cd). The change: let a repeat neither pick nor close a tab group modal, by passing the repeat flag to `key_down` or by dropping repeats in `key_event_impl` while one is open. Test: a repeat of the letter that opened a popup leaves the popup open and activates nothing. Signal: none. Promote when a held hint letter is seen landing on a tab, or when the modal key path is next changed.
+
+### `tab-group-modal-pane-paths`
+
+- side: gui
+- state: proposed
+- needs: `unit/tab-group-popup-keys`
+- why: Two key paths reach the pane without passing the open tab group modal a chance to close, so the key arrives with the popup or the hints still drawn. Text an input method commits arrives as `Key::Composed`, which no modal sees, so with a Chinese input source on a hint letter does not pick. An Alt key that `send_composed_key_when_left_alt_is_pressed = false` (or the right or generic Alt setting) sends raw is written to the pane by `process_key`'s `bypass_compose` branch after the modal passed it. Found by the gate review of 2026-10-21 and read in `keyevent.rs` at 7cd3ff040, not run. The change: close a tab group modal on either path before the key goes on, as `key_down_unbound` does for an unbound key. Test: with hints shown, committed composed text and a bypassed Alt key each close them and reach the pane once. Signal: none. Promote when hints or the popup are used with an input method on, or when either path is next changed.
+
 ## Deferred
 
 Decided against for the current topology (one GUI on `human-main`). Not retired; the row returns to Open if the need does.
