@@ -8,7 +8,10 @@ without activating any tab.
 
 Each folded group's item reads its hint where the numbers of its first and
 last tabs were, and keeps its width, so nothing in the tab bar moves. Every
-other tab is dimmed. The hints are letters from
+other tab is dimmed. With tab numbers turned off
+([show_tab_index_in_tab_bar](../config/show_tab_index_in_tab_bar.md)) there
+are no numbers to replace, so the hint is added in front of the label and the
+item grows by it. The hints are letters from
 [quick_select_alphabet](../config/quick_select_alphabet.md), one per folded
 group in the order they are drawn, in the `quick_select_label_fg` and
 `quick_select_label_bg` colors. A group past the end of the alphabet keeps its
@@ -22,7 +25,11 @@ While the hints are shown:
 * Escape closes the hints;
 * a key with Cmd, Ctrl or Alt still performs its key assignment, and the hints
   stay;
-* any other key closes the hints and goes on to the pane;
+* a key with Cmd, Ctrl or Alt that has no key assignment closes the hints and
+  goes on to the pane;
+* any other key closes the hints and goes on as it would with no hints: to its
+  key assignment if it has one, else to the pane;
+* an overlay opening over the active tab, such as quick select, closes them;
 * a mouse press closes the hints and then does what it would have done;
 * activating another tab closes them.
 

@@ -15,10 +15,18 @@ impl crate::TermWindow {
         self.update_next_frame_time(self.tab_bar.next_progress_frame_due());
 
         if self.config.use_fancy_tab_bar {
+            // A bar drawn with tab group hints is drawn again without them once
+            // the hints are gone, however they went: another modal, such as
+            // the command palette, can replace them.
+            let hinting = self.tab_group_hints_open();
+            if self.fancy_tab_bar_hinted != hinting {
+                self.fancy_tab_bar.take();
+            }
             if self.fancy_tab_bar.is_none() {
                 let palette = self.palette().clone();
                 let (tab_bar, popup) = self.build_fancy_tab_bar(&palette)?;
                 self.fancy_tab_bar.replace(tab_bar);
+                self.fancy_tab_bar_hinted = hinting;
                 self.set_tab_group_popup_layout(popup);
             }
 

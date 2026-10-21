@@ -406,20 +406,13 @@ const HINT_DIM: f32 = 0.35;
 fn dim_color(colors: &TabBarColors) -> ColorAttribute {
     let fg: termwiz::color::SrgbaTuple = colors.inactive_tab().fg_color.into();
     let bg: termwiz::color::SrgbaTuple = colors.background().into();
-    let mix = |f: f32, b: f32| b + (f - b) * HINT_DIM;
-    ColorAttribute::TrueColorWithDefaultFallback(termwiz::color::SrgbaTuple(
-        mix(fg.0, bg.0),
-        mix(fg.1, bg.1),
-        mix(fg.2, bg.2),
-        1.0,
-    ))
+    ColorAttribute::TrueColorWithDefaultFallback(bg.interpolate(fg, HINT_DIM as f64))
 }
 
-/// A folded group's title with `hint` where its tab numbers were: the
-/// title's first `prefix_cells` cells, its leading space and numbers
-/// (`tab_group_prefix`), become a space, the hint in the hint colors and a
-/// colon. The tab bar's font may be proportional, so the item keeps its
-/// width by being given the unhinted title's width, not by cell count.
+/// A folded group's title with `hint` where its tab numbers were: its first
+/// `prefix_cells` cells, its leading space and numbers (`tab_group_prefix`),
+/// become ` <hint>: `, the hint in the hint colors. With no numbers to
+/// replace (tab numbers turned off) the hint is added and the title grows.
 fn hinted_title(
     title: &Line,
     prefix_cells: usize,
@@ -808,6 +801,9 @@ impl crate::TermWindow {
                             },
                             &Element::with_line(&font, before, palette),
                         )?;
+                        // The tab bar's font may be proportional, so the hinted
+                        // item keeps its width by being given its title's
+                        // width as it was, not by its cell count.
                         elem.min_width = Some(Dimension::Pixels(measured.bounds.width()));
                     }
                     elem.max_width = Some(Dimension::Pixels(max_tab_width));

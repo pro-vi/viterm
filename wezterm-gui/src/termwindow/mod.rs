@@ -404,6 +404,8 @@ pub struct TermWindow {
     show_scroll_bar: bool,
     tab_bar: TabBarState,
     fancy_tab_bar: Option<box_model::ComputedElement>,
+    /// Whether `fancy_tab_bar` was built with tab group hints shown.
+    fancy_tab_bar_hinted: bool,
     pub right_status: String,
     pub left_status: String,
     /// The groups `window:set_tab_groups` asked the tab bar to fold.
@@ -731,6 +733,7 @@ impl TermWindow {
             show_scroll_bar: config.enable_scroll_bar,
             tab_bar: TabBarState::default(),
             fancy_tab_bar: None,
+            fancy_tab_bar_hinted: false,
             right_status: String::new(),
             left_status: String::new(),
             tab_groups: vec![],
@@ -2010,6 +2013,7 @@ impl TermWindow {
             }
             _ => {
                 self.close_tab_group_popup();
+                self.close_tab_group_hints();
                 return false;
             }
         };
@@ -2248,15 +2252,18 @@ impl TermWindow {
                 self.close_tab_group_popup();
             }
         }
-        // The hints close once no group folds, and once another tab is
-        // active than when they opened.
+        // The hints close once no group folds, once another tab is active
+        // than when they opened, and once an overlay covers the active tab.
         let hints_opened_on = self.get_modal().and_then(|modal| {
             modal
                 .downcast_ref::<tabgrouphints::TabGroupHints>()
                 .map(|hints| hints.opened_on)
         });
         if let Some(on) = hints_opened_on {
-            if self.tab_bar.folded().is_empty() || on != self.active_tab_id() {
+            if self.tab_bar.folded().is_empty()
+                || on != self.active_tab_id()
+                || self.active_tab_has_overlay()
+            {
                 self.close_tab_group_hints();
             }
         }
