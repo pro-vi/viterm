@@ -1,5 +1,5 @@
 //! The popup a folded tab group opens: the tabs the group holds, drawn as
-//! the tab bar draws tabs, floating over the panes next to the group's item.
+//! the tab bar draws tabs, floating next to the group's item.
 //! The fancy tab bar lays it out while it lays out the bar
 //! (`build_fancy_tab_bar`), because the bar knows where the item is and how
 //! the style draws a tab, and hands the layout to this modal, which only
