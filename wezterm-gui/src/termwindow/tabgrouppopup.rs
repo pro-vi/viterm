@@ -95,27 +95,35 @@ pub fn press_on_popup(item: Option<&UIItemType>) -> PressOnPopup {
     }
 }
 
-/// Where the popup's top left corner goes, in window pixels: centred on the
-/// item it opened from, kept `margin` pixels inside the window, and `gap`
-/// pixels past the item on the side away from the window edge the tab bar
-/// sits on.
+/// Where the popup goes, in window pixels: its top left corner, and whether
+/// it sits above its item. It is centred on the item it opened from and kept
+/// `margin` pixels inside the window, `gap` pixels past the item. It goes
+/// toward the window edge the tab bar sits on when the bar's rows there
+/// hold it, so it covers tab bar rows rather than the panes' last lines;
+/// otherwise it goes the other way, as with a one-row tab bar.
 pub fn popup_origin(
     item: euclid::default::Rect<f32>,
     popup: euclid::default::Size2D<f32>,
     window_width: f32,
+    bar: euclid::default::Rect<f32>,
     bar_at_bottom: bool,
     gap: f32,
     margin: f32,
-) -> euclid::default::Point2D<f32> {
+) -> (euclid::default::Point2D<f32>, bool) {
     let centre = item.origin.x + item.size.width / 2.;
     let max_x = (window_width - popup.width - margin).max(margin);
     let x = (centre - popup.width / 2.).clamp(margin, max_x);
-    let y = if bar_at_bottom {
-        item.origin.y - gap - popup.height
+    let below = item.max_y() + gap;
+    let above = item.origin.y - gap - popup.height;
+    let fits_below = below + popup.height <= bar.max_y();
+    let fits_above = above >= bar.origin.y;
+    let is_above = if bar_at_bottom {
+        !fits_below
     } else {
-        item.origin.y + item.size.height + gap
+        fits_above
     };
-    euclid::point2(x, y.max(0.))
+    let y = if is_above { above } else { below };
+    (euclid::point2(x, y.max(0.)), is_above)
 }
 
 /// Where the point under (or over) the popup goes: at the item's centre,
@@ -147,11 +155,12 @@ mod test {
             rect(600., 900., 100., 30.),
             euclid::size2(300., 40.),
             1440.,
+            rect(0., 900., 1440., 30.),
             true,
             8.,
             4.,
         );
-        assert_eq!(o, euclid::point2(500., 852.));
+        assert_eq!(o, (euclid::point2(500., 852.), true));
     }
 
     #[test]
@@ -160,33 +169,37 @@ mod test {
             rect(600., 0., 100., 30.),
             euclid::size2(300., 40.),
             1440.,
+            rect(0., 0., 1440., 30.),
             false,
             8.,
             4.,
         );
-        assert_eq!(o, euclid::point2(500., 38.));
+        assert_eq!(o, (euclid::point2(500., 38.), false));
     }
 
     #[test]
     fn a_popup_near_an_edge_stays_inside_the_window() {
+        let bar = rect(0., 900., 1440., 30.);
         let right = popup_origin(
             rect(1400., 900., 40., 30.),
             euclid::size2(300., 40.),
             1440.,
+            bar,
             true,
             8.,
             4.,
         );
-        assert_eq!(right.x, 1136.);
+        assert_eq!(right.0.x, 1136.);
         let left = popup_origin(
             rect(0., 900., 40., 30.),
             euclid::size2(300., 40.),
             1440.,
+            bar,
             true,
             8.,
             4.,
         );
-        assert_eq!(left.x, 4.);
+        assert_eq!(left.0.x, 4.);
     }
 
     #[test]
@@ -195,11 +208,62 @@ mod test {
             rect(100., 900., 40., 30.),
             euclid::size2(2000., 40.),
             1440.,
+            rect(0., 900., 1440., 30.),
             true,
             8.,
             4.,
         );
-        assert_eq!(o.x, 4.);
+        assert_eq!(o.0.x, 4.);
+    }
+
+    #[test]
+    fn a_popup_over_a_bottom_bar_covers_the_rows_below_its_item_when_they_hold_it() {
+        let bar = rect(0., 840., 1440., 90.);
+        let first_row = popup_origin(
+            rect(600., 840., 100., 30.),
+            euclid::size2(300., 40.),
+            1440.,
+            bar,
+            true,
+            8.,
+            4.,
+        );
+        assert_eq!(first_row, (euclid::point2(500., 878.), false));
+        let last_row = popup_origin(
+            rect(600., 900., 100., 30.),
+            euclid::size2(300., 40.),
+            1440.,
+            bar,
+            true,
+            8.,
+            4.,
+        );
+        assert_eq!(last_row, (euclid::point2(500., 852.), true));
+    }
+
+    #[test]
+    fn a_popup_under_a_top_bar_covers_the_rows_above_its_item_when_they_hold_it() {
+        let bar = rect(0., 0., 1440., 90.);
+        let last_row = popup_origin(
+            rect(600., 60., 100., 30.),
+            euclid::size2(300., 40.),
+            1440.,
+            bar,
+            false,
+            8.,
+            4.,
+        );
+        assert_eq!(last_row, (euclid::point2(500., 12.), true));
+        let first_row = popup_origin(
+            rect(600., 0., 100., 30.),
+            euclid::size2(300., 40.),
+            1440.,
+            bar,
+            false,
+            8.,
+            4.,
+        );
+        assert_eq!(first_row, (euclid::point2(500., 38.), false));
     }
 
     #[test]

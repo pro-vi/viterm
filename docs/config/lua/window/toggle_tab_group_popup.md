@@ -10,8 +10,10 @@ item, and `true` otherwise.
 The popup is what clicking a group's item in the fancy tab bar opens: the
 group's tabs, drawn as the tab bar draws tabs and with the titles they would
 have there, in a box of the tab bar's color with the corners of the tab bar's
-tab shape, next to the item and over the bottom (or top) lines of the panes,
-with a point aimed at the item. The tab bar and the panes do not move.
+tab shape, next to the item, with a point aimed at the item. It sits over the
+tab bar's rows on the side of the window edge the bar is at, when those rows
+hold it, and otherwise over the bottom (or top) lines of the panes, as with a
+one-row tab bar. The tab bar and the panes do not move.
 
 Clicking one of its tabs activates that tab and closes the popup. Escape, a
 click outside it, or a second click on the group's item closes it; a click in
