@@ -229,6 +229,21 @@ pub fn folded_ranges(groups: &[TabGroupSpec], tab_ids: &[TabId]) -> Vec<(usize, 
     out
 }
 
+/// The start of a folded group's item, before its label: a space, then the
+/// numbers of the first and last tabs it holds, numbered as the tab bar
+/// numbers tabs. Hints are drawn in its place.
+pub fn tab_group_prefix(tabs: &Range<usize>, show_index: bool, zero_based: bool) -> String {
+    if show_index {
+        format!(
+            " {}\u{2013}{}: ",
+            tab_number(tabs.start, zero_based),
+            tab_number(tabs.end - 1, zero_based)
+        )
+    } else {
+        " ".to_string()
+    }
+}
+
 /// The parts of a folded group's text: the numbers of the first and last
 /// tabs it holds, then its label, then its marks, each the number of its tab
 /// and its glyph, all numbered as the tab bar numbers tabs.
@@ -239,15 +254,6 @@ fn group_title(
     show_index: bool,
     zero_based: bool,
 ) -> GroupTitle {
-    let prefix = if show_index {
-        format!(
-            " {}\u{2013}{}: ",
-            tab_number(tabs.start, zero_based),
-            tab_number(tabs.end - 1, zero_based)
-        )
-    } else {
-        " ".to_string()
-    };
     let marks = spec
         .marks
         .iter()
@@ -257,7 +263,7 @@ fn group_title(
         })
         .collect();
     GroupTitle {
-        prefix,
+        prefix: tab_group_prefix(tabs, show_index, zero_based),
         label: spec.label.clone(),
         marks,
         busy: spec.busy.clone(),

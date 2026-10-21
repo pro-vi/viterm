@@ -230,6 +230,9 @@ impl super::TermWindow {
         // toggles that group's popup instead; anywhere else it goes no
         // further, and neither does its release.
         if let WMEK::Press(press) = &event.kind {
+            // A press while tab group hints are shown closes them, then acts
+            // as it would without them.
+            self.close_tab_group_hints();
             if self.open_popup_tab().is_some() {
                 match press_on_popup(ui_item.as_ref().map(|item| &item.item_type)) {
                     PressOnPopup::Keep => {}

@@ -84,6 +84,7 @@ pub mod render;
 pub mod resize;
 mod selection;
 pub mod spawn;
+pub mod tabgrouphints;
 pub mod tabgrouppopup;
 pub mod webgpu;
 use crate::spawn::SpawnWhere;
@@ -130,6 +131,7 @@ pub enum TermWindowNotif {
     SetTabGroups(Vec<crate::tabbar::TabGroupSpec>),
     ToggleTabGroupPopup(Sender<bool>),
     OpenTabGroupPopup(usize, Sender<bool>),
+    ShowTabGroupHints(Sender<bool>),
     GetDimensions(Sender<(Dimensions, WindowState)>),
     GetSelectionForPane {
         pane_id: PaneId,
@@ -1242,6 +1244,12 @@ impl TermWindow {
                     .map_err(chan_err)
                     .context("send OpenTabGroupPopup response")?;
             }
+            TermWindowNotif::ShowTabGroupHints(tx) => {
+                let done = self.show_tab_group_hints();
+                tx.try_send(done)
+                    .map_err(chan_err)
+                    .context("send ShowTabGroupHints response")?;
+            }
             TermWindowNotif::GetDimensions(tx) => {
                 tx.try_send((self.dimensions, self.window_state))
                     .map_err(chan_err)
@@ -1978,6 +1986,48 @@ impl TermWindow {
         }
     }
 
+    /// Whether the window's modal is the tab group hints.
+    fn tab_group_hints_open(&self) -> bool {
+        self.get_modal().map_or(false, |modal| {
+            modal
+                .downcast_ref::<tabgrouphints::TabGroupHints>()
+                .is_some()
+        })
+    }
+
+    /// Whether a modal other than the tab group popup or hints is open, such
+    /// as the command palette, which the tab group methods leave alone.
+    fn other_modal_open(&self) -> bool {
+        self.get_modal().is_some()
+            && self.open_popup_tab().is_none()
+            && !self.tab_group_hints_open()
+    }
+
+    /// What window:show_tab_group_hints does: shows a hint on each folded
+    /// group, in place of an open group popup. False, with nothing changed,
+    /// when the hints are already shown, when no group is folded or the
+    /// alphabet gives no hint, or when another kind of modal is open.
+    fn show_tab_group_hints(&mut self) -> bool {
+        if self.tab_group_hints_open() || self.other_modal_open() {
+            return false;
+        }
+        let count = self.tab_bar.folded().len();
+        if tabgrouppopup::hints(&self.config.quick_select_alphabet, count).is_empty() {
+            return false;
+        }
+        let opened_on = self.active_tab_id();
+        self.set_modal(Rc::new(tabgrouphints::TabGroupHints::new(opened_on)));
+        self.invalidate_fancy_tab_bar();
+        true
+    }
+
+    pub fn close_tab_group_hints(&mut self) {
+        if self.tab_group_hints_open() {
+            self.cancel_modal();
+            self.invalidate_fancy_tab_bar();
+        }
+    }
+
     /// The id of this window's active tab.
     fn active_tab_id(&self) -> Option<mux::tab::TabId> {
         Mux::get()
@@ -1991,7 +2041,7 @@ impl TermWindow {
     /// tab is in no folded group, when its group's popup is already open, or
     /// when another kind of modal is open.
     fn open_tab_group_popup_for_tab(&mut self, tab_idx: usize) -> bool {
-        if self.get_modal().is_some() && self.open_popup_tab().is_none() {
+        if self.other_modal_open() {
             return false;
         }
         let Some(group) = self
@@ -2275,6 +2325,18 @@ impl TermWindow {
                 || opened_on.map_or(false, |on| on != self.active_tab_id())
             {
                 self.close_tab_group_popup();
+            }
+        }
+        // The hints close once no group folds, and once another tab is
+        // active than when they opened.
+        let hints_opened_on = self.get_modal().and_then(|modal| {
+            modal
+                .downcast_ref::<tabgrouphints::TabGroupHints>()
+                .map(|hints| hints.opened_on)
+        });
+        if let Some(on) = hints_opened_on {
+            if self.tab_bar.folded().is_empty() || on != self.active_tab_id() {
+                self.close_tab_group_hints();
             }
         }
 
