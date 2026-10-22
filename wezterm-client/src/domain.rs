@@ -621,13 +621,35 @@ impl ClientDomain {
                     reported_sizes.push((Arc::clone(&pane), reported_size));
                     pane
                 });
-                if topology_changed {
-                    // The tab took the server's tree and its sizes, so those
-                    // are now the sizes its panes have; record them without
-                    // sending them back.
-                    for (pane, size) in reported_sizes {
-                        if let Some(pane) = pane.downcast_ref::<ClientPane>() {
-                            pane.adopt_server_size(size);
+                // The sizes this tab's layout gives its panes: the one
+                // pane a zoomed tab shows, and every pane otherwise. A
+                // pane the server holds at another size is answered with
+                // that layout size; a pane behind a zoom keeps the size
+                // the server reported, as the zoom resizes only the pane
+                // it shows.
+                let tab_size = tab.get_size();
+                let layout_sizes: HashMap<PaneId, TerminalSize> = tab
+                    .iter_panes()
+                    .iter()
+                    .map(|pos| {
+                        (
+                            pos.pane.pane_id(),
+                            TerminalSize {
+                                cols: pos.width,
+                                rows: pos.height,
+                                pixel_width: pos.pixel_width,
+                                pixel_height: pos.pixel_height,
+                                dpi: tab_size.dpi,
+                            },
+                        )
+                    })
+                    .collect();
+                for (pane, reported) in reported_sizes {
+                    if let Some(pane) = pane.downcast_ref::<ClientPane>() {
+                        match layout_sizes.get(&pane.pane_id()) {
+                            Some(size) => pane.reconcile_server_size(reported, *size),
+                            None if topology_changed => pane.adopt_server_size(reported),
+                            None => {}
                         }
                     }
                 }
