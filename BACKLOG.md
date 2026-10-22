@@ -4,8 +4,8 @@ Units that have no branch yet. `PATCHES.md` holds every unit that has one; an
 entry leaves this file at the moment `git switch -c unit/<slug>` is run. The
 entries the plan of 2026-09-06 proposed keep its relative order, minus
 `mux-socket-buffers`, which has a branch and so lives in `PATCHES.md`.
-`tab-order-on-reattach` replaces that plan's `tab-order-over-protocol` (the
-need, not a chosen mechanism). `flash-message`, `picker-modal` and
+That plan's `tab-order-over-protocol` has a branch now and lives in
+`PATCHES.md`. `flash-message`, `picker-modal` and
 `mux-push-queue-bound` came later and have no place in that order yet. Deferred units are decided against
 for the current topology, not retired; they return if the need does. The
 `notes:` lines name investigation notes in `.inbox/`, which is local to this
@@ -57,14 +57,6 @@ Named `tabbar-title-memo` until 2026-10-02; plans written before then use that n
 - why: A `ClientPane` starts with an empty `user_vars` map and learns only from live `Alert::SetUserVar`, so state carried in user vars is missing after every GUI relaunch. Send each pane's current vars when a client attaches it
 - notes: `2026-09-06-viterm-freeze-fork-plan.md`
 
-### `tab-order-on-reattach`
-
-- side: gui or protocol, depending on the mechanism
-- state: proposed
-- needs: A choice of mechanism. Isolation is not a prerequisite while there is one GUI. The protocol path needs GUI and mux server built from the same commit. The config-replay path needs no codec change and no mux restart
-- why: A reordered tab reverts on GUI relaunch / engine install, because `codec` has no tab-move message. The server does hold an order; nothing can permute it. Reproduced 2026-09-19: `MoveTabRelative` in one GUI was invisible to the server and gone after reattach. That is the useful part for this machine: ~28 tabs as spatial memory. Two candidate solutions, neither chosen: (1) canonical `MoveTab` over the protocol, the original `tab-order-over-protocol` unit — an existing client is not re-ordered by a resync, so the order needs its own apply path, and a local window can span several remote windows, so a move names a remote window and a remote tab; (2) Lua replay on attach from `window:mux_window():tabs()` plus `MoveTab`, no protocol change. (2) has to key on tab title or a pane's launch id, because a Lua `tab:tab_id()` is a local id regenerated per GUI process, so it matches by name rather than identity. Drawn-bar jump already uses `mux_window:tabs_with_info()` and does not need this
-- notes: `2026-09-19-mux-viewer-selection-and-tab-order.md`, `2026-09-06-viterm-freeze-fork-plan.md`
-
 ### `vertical-tabs`
 
 - side: gui
@@ -97,6 +89,55 @@ Named `tabbar-title-memo` until 2026-10-02; plans written before then use that n
 - why: Each session's outgoing queue (`dispatch.rs`, `smol::channel::unbounded::<Item>()`) takes every push with `try_send`, and `compute_changes()` queues a full `GetPaneRenderChangesResponse` for each output event of each subscribed pane, so one connected client that stops reading grows the server without limit. `mux-render-subscribers` stopped pushes to connections that subscribe to nothing, the multiplier inferred for the server that grew to 296 GB and was killed on 2026-10-08 (queue sizes were not recorded). Since then one server ran from 2026-10-10 to 2026-10-19 between 330 MB and 1.85 GB, and grew 180 MB during seven hours of a saturated GUI main thread on 2026-10-17. If it is built: keep at most one pending render push per pane per session, the newest replacing an unsent one, so a stalled reader costs one push per pane; closing a session whose queue passes a byte limit is the alternative
 - notes: `2026-10-11-per-session-push-queue-still-unbounded.md`
 
+### `tab-bar-drag`
+
+- side: gui
+- state: proposed
+- needs: `unit/tab-groups` (base). Plan `docs/plans/2026-10-20-001-feat-tab-groups-plan.md` U10.
+- why: A press, drag and release on a tab or a folded tab group in the fancy tab bar should move it, a group moving its whole run, through `Window::set_tab_order` and `WindowTabOrderChanged` as `move_tab` does; a config that keeps a folder order (bootstrap's `tab_groups.lua`) then reads the new order on its next tick. Today the order changes only through `MoveTab` keys and Lua. The new order is a pure function of (items, dragged item, drop slot), which is the tested seam; no tool here drives mouse input into a native window, so the press path waits for a person.
+
+### `tab-bar-motion`
+
+- side: gui
+- state: proposed
+- needs: `unit/tab-groups` (base). Plan `docs/plans/2026-10-20-001-feat-tab-groups-plan.md` U11.
+- why: When a folded group opens or closes, or a tab moves into its group, the drawn boxes jump between layouts. Keeping each item's previous rect by key and easing to the new one over about half a second, with frames scheduled through `update_next_frame_time` (the spinner's path), would show the move without any Lua during it; with the window unfocused the final layout is drawn at once. `colorease.rs` has curves; nothing eases a position yet.
+
+### `tab-groups-live-check`
+
+- side: gui
+- state: proposed
+- needs: `unit/tab-groups`, `unit/mux-window-set-tab-order`; bootstrap's `configs/wezterm/tab_groups.lua` driver.
+- why: Nothing re-runs the tab groups on an engine. Bootstrap's CI checks the driver on fake window objects only, and its GUI lane runs stock wezterm, which has no `set_tab_groups`. A case in `fork/tab-sync-harness` (or beside it) on a throwaway mux and GUI would open tabs across projects from a checkout map, assert that each project's tabs are contiguous in the server's order and that `tab_bar_fit` counts each folded group as one item, toggle the popup with `window:toggle_tab_group_popup()`, restart the GUI on an edited saved order while tabs arrive over several ticks, and run once more against an engine without the methods to see nothing change. Since 2026-10-21 it should also call `show_tab_group_hints()` and `open_tab_group_popup(i)` and check their returns, and cut a group with marks to a narrow row to see its marks kept (`docs/plans/2026-10-21-001-feat-tab-group-peek-plan.md`). The same steps were run by hand on engine 20261020-072440-1f588a65 against a mux of the same build and one of 20261018-200420-656e4f47. Signal: none: no job runs the tab groups on an engine. Promote when the next change to the driver or to the engine's tab group code is made.
+
+### `tab-order-two-gui-settle`
+
+- side: both
+- state: proposed
+- needs: `unit/tab-order-over-protocol`, `unit/mux-window-set-tab-order`; bootstrap's `configs/wezterm/tab_groups.lua` driver; a mux server on an engine that takes tab orders.
+- why: Once the server owns tab order, every GUI attached to it runs bootstrap's tab groups driver, which calls `MuxWindow:set_tab_order` on a status tick whenever its own arrangement differs from the window's order. Another GUI's reorder arrives as the server's order and the driver follows it as a hand move, so two GUIs that see the same pane directories and checkout map should settle on one order within a tick; nothing has shown it, and a GUI that learns a tab's directory a tick before the other arranges that tab differently for that tick. A case beside `tab-groups-live-check`: two GUIs with the driver on one throwaway server, tabs across projects, then a minute idle, asserting that each GUI's received `TabAddedToWindow` count stops rising after the first arrangement. Signal: `mux.client.recv.TabAddedToWindow` (from `client-resync-counters`) rising in an idle GUI's stats. Promote when the mux server first runs an engine that takes tab orders while two GUIs are attached.
+
+### `tab-order-new-tab-place`
+
+- side: gui
+- state: proposed
+- needs: `unit/tab-order-over-protocol`
+- why: While a tab move made in this client is in flight, a pane list's order is skipped but its new tabs are still added, at the end of their local window (`process_pane_list` appends with `push_tab`). A move sent before the skipped order is read again names every tab of the window, that new tab last, and a server that takes tab orders puts it there: another client's placement of the tab is undone, and every GUI then shows it last. Found by the harden review's fourth gate (invariance) on 2026-10-20 at d63a62ae4. The narrow change: a tab a list adds to an existing local window goes after the tab before it in the list, not at the end; an older server always appends, so nothing changes against one. Test pair: with a move in flight, a list that adds a tab at the front, then a second move, must not send the new tab last; with no move in flight the list's order is shown as now. Signal: none, since nothing records a request that moves a tab no user moved. Promote when a tab another GUI placed is seen at the end after a move here, or when the list application is next changed.
+
+### `tab-group-hint-key-repeat`
+
+- side: gui
+- state: proposed
+- needs: `unit/tab-group-hints`
+- why: `Modal::key_down` is not told when a key is a repeat. A hint letter held past the key-repeat delay opens group k's popup on the press, and the repeat then picks the popup's tab with the same letter, because both hint lists start at the alphabet's first letter. Found by the gate review of 2026-10-21 (build at 8c390b4cd). The change: let a repeat neither pick nor close a tab group modal, by passing the repeat flag to `key_down` or by dropping repeats in `key_event_impl` while one is open. Test: a repeat of the letter that opened a popup leaves the popup open and activates nothing. Signal: none. Promote when a held hint letter is seen landing on a tab, or when the modal key path is next changed.
+
+### `tab-group-modal-pane-paths`
+
+- side: gui
+- state: proposed
+- needs: `unit/tab-group-popup-keys`
+- why: Two key paths reach the pane without passing the open tab group modal a chance to close, so the key arrives with the popup or the hints still drawn. Text an input method commits arrives as `Key::Composed`, which no modal sees, so with a Chinese input source on a hint letter does not pick. An Alt key that `send_composed_key_when_left_alt_is_pressed = false` (or the right or generic Alt setting) sends raw is written to the pane by `process_key`'s `bypass_compose` branch after the modal passed it. Found by the gate review of 2026-10-21 and read in `keyevent.rs` at 7cd3ff040, not run. The change: close a tab group modal on either path before the key goes on, as `key_down_unbound` does for an unbound key. Test: with hints shown, committed composed text and a bypassed Alt key each close them and reach the pane once. Signal: none. Promote when hints or the popup are used with an input method on, or when either path is next changed.
+
 ## Deferred
 
 Decided against for the current topology (one GUI on `human-main`). Not retired; the row returns to Open if the need does.
@@ -106,7 +147,7 @@ Decided against for the current topology (one GUI on `human-main`). Not retired;
 - side: protocol
 - state: deferred (2026-09-20)
 - needs: A second viewer attached on purpose. Until then this machine wants shared selection: `wezterm cli activate-pane-direction` is supposed to move the one GUI. A codec bump and mux restart for a two-GUI design would be the wrong cost
-- why: Focusing a pane in one GUI moves every other attached GUI's active tab, and a GUI receives its own focus echo. Reproduced 2026-09-19 on a throwaway mux: raising one window moved the other from TAB-0 to TAB-2; the trigger is OS window focus, not a headless activation. The bug is real and not this machine's. There is one GUI; a second on `human-main` is forbidden because it acks attention markers, and isolation would not lift that. The freeze is `pr-7763`, not this. Tab order on relaunch is `tab-order-on-reattach` and does not depend on this while there is one GUI. Build it if a second viewer is ever a workflow
+- why: Focusing a pane in one GUI moves every other attached GUI's active tab, and a GUI receives its own focus echo. Reproduced 2026-09-19 on a throwaway mux: raising one window moved the other from TAB-0 to TAB-2; the trigger is OS window focus, not a headless activation. The bug is real and not this machine's. There is one GUI; a second on `human-main` is forbidden because it acks attention markers, and isolation would not lift that. The freeze is `pr-7763`, not this. Tab order on relaunch is the unit `tab-order-over-protocol`, which does not depend on this. Build it if a second viewer is ever a workflow
 - notes: `2026-09-19-mux-viewer-selection-and-tab-order.md`
 
 ### `termwiz-repaint-follow-ups`

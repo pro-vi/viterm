@@ -1042,7 +1042,54 @@ impl Reconnectable {
     }
 }
 
+/// The requests sent through a client made by `Client::dummy`.
+#[cfg(test)]
+pub(crate) struct SentRequests(Receiver<ReaderMessage>);
+
+#[cfg(test)]
+impl SentRequests {
+    /// The requests sent since the last call, oldest first.
+    pub(crate) fn take(&self) -> Vec<Pdu> {
+        let mut pdus = vec![];
+        while let Ok(message) = self.0.try_recv() {
+            if let ReaderMessage::SendPdu { pdu, .. } = message {
+                pdus.push(pdu);
+            }
+        }
+        pdus
+    }
+
+    /// Answer each request sent since the last call with `respond`, and
+    /// return the requests, oldest first.
+    pub(crate) fn answer(&self, respond: impl Fn(&Pdu) -> anyhow::Result<Pdu>) -> Vec<Pdu> {
+        let mut pdus = vec![];
+        while let Ok(message) = self.0.try_recv() {
+            if let ReaderMessage::SendPdu { pdu, promise } = message {
+                promise.try_send(respond(&pdu)).ok();
+                pdus.push(pdu);
+            }
+        }
+        pdus
+    }
+}
+
 impl Client {
+    /// A client with no connection: no server answers its requests; the
+    /// returned `SentRequests` reads each one back and can answer it.
+    #[cfg(test)]
+    pub(crate) fn dummy() -> (Self, SentRequests) {
+        let (sender, receiver) = unbounded();
+        let client = Self {
+            sender,
+            local_domain_id: None,
+            client_id: ClientId::new(),
+            client_domain_config: ClientDomainConfig::Unix(UnixDomain::default()),
+            is_reconnectable: false,
+            is_local: false,
+        };
+        (client, SentRequests(receiver))
+    }
+
     fn new(local_domain_id: Option<DomainId>, mut reconnectable: Reconnectable) -> Self {
         let client_domain_config = reconnectable.config.clone();
         let is_reconnectable = reconnectable.reconnectable();
@@ -1381,6 +1428,7 @@ impl Client {
     rpc!(set_client_id, SetClientId, UnitResponse);
     rpc!(list_clients, GetClientList = (), GetClientListResponse);
     rpc!(set_window_workspace, SetWindowWorkspace, UnitResponse);
+    rpc!(set_window_tab_order, SetWindowTabOrder, UnitResponse);
     rpc!(set_focused_pane_id, SetFocusedPane, UnitResponse);
     rpc!(get_image_cell, GetImageCell, GetImageCellResponse);
     rpc!(set_configured_palette_for_pane, SetPalette, UnitResponse);

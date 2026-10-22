@@ -194,6 +194,17 @@ impl ImageCell {
         &self.data
     }
 
+    /// Point this cell at new data for its kitty image id, as when the
+    /// client retransmits an image under an id that is already displayed.
+    /// Returns false, leaving the cell untouched, if it shows another image.
+    pub fn replace_data_for_image_id(&mut self, image_id: u32, data: &Arc<ImageData>) -> bool {
+        if self.image_id != Some(image_id) {
+            return false;
+        }
+        self.data = Arc::clone(data);
+        true
+    }
+
     /// negative z_index is rendered beneath the text layer.
     /// >= 0 is rendered above the text.
     /// negative z_index < INT32_MIN/2 will be drawn under cells

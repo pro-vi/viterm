@@ -503,6 +503,7 @@ pdu! {
     GetPaneDirection: 60,
     GetPaneDirectionResponse: 61,
     AdjustPaneSize: 62,
+    SetWindowTabOrder: 63,
 }
 
 impl Pdu {
@@ -776,6 +777,17 @@ pub struct SetWindowWorkspace {
     pub workspace: String,
 }
 
+/// Put the tabs of a window in this order; tabs it does not name keep their
+/// place (see `Window::set_tab_order`), so an empty order moves nothing and
+/// tells a client whether the server takes the request. A server that
+/// applies it tells its clients with TabAddedToWindow; one that predates it
+/// answers that the PDU is invalid.
+#[derive(Deserialize, Serialize, PartialEq, Debug)]
+pub struct SetWindowTabOrder {
+    pub window_id: WindowId,
+    pub tab_ids: Vec<TabId>,
+}
+
 #[derive(Deserialize, Serialize, PartialEq, Debug)]
 pub struct RenameWorkspace {
     pub old_workspace: String,
@@ -797,6 +809,8 @@ pub struct NotifyAlert {
     pub alert: Alert,
 }
 
+/// Also sent, with the id of the window's first tab, when a window's tabs
+/// were put in a new order; a client re-reads the pane list for either.
 #[derive(Deserialize, Serialize, PartialEq, Debug)]
 pub struct TabAddedToWindow {
     pub tab_id: TabId,
