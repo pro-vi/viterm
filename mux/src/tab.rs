@@ -2681,7 +2681,7 @@ mod test {
             });
         assert!(changed, "pane 3 replaced pane 2");
         assert_eq!(tab.get_size(), term_size(80, 24));
-        assert_eq!(widths(&tab), vec![(1, 39, 24), (3, 40, 24)]);
+        assert_eq!(widths(&tab), vec![(1, 40, 24), (3, 39, 24)]);
         assert_eq!(
             (one.resize_count(), three.resize_count()),
             (0, 0),
@@ -2707,7 +2707,7 @@ mod test {
             });
         assert!(changed, "pane 3 replaced pane 2");
         assert_eq!(tab.get_size(), term_size(80, 24));
-        assert_eq!(widths(&tab), vec![(1, 39, 24), (3, 40, 24)]);
+        assert_eq!(widths(&tab), vec![(1, 40, 24), (3, 39, 24)]);
     }
 
     #[test]
