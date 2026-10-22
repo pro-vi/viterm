@@ -273,6 +273,21 @@ impl ClientPane {
         }
     }
 
+    /// Gives the panes of this pane's tab their layout sizes again, as a
+    /// resize of the tab to its own size does. Focus means this client is
+    /// the one in use, so a pane the server was seen holding at another
+    /// client's size asks for this client's size once more; a pane the
+    /// server already holds at its layout size sends nothing.
+    fn reapply_tab_size(&self) {
+        let tab = Mux::try_get().and_then(|mux| {
+            mux.resolve_pane_id(self.local_pane_id)
+                .and_then(|(_, _, tab_id)| mux.get_tab(tab_id))
+        });
+        if let Some(tab) = tab {
+            tab.resize(tab.get_size());
+        }
+    }
+
     /// Answers a size the server reported for this pane with the size
     /// this client's layout gives it, when the two differ and no request
     /// for this pane is still unanswered. Only the layout size is sent.
@@ -714,6 +729,7 @@ impl Pane for ClientPane {
         if focused {
             self.advise_focus();
             *self.unseen_output.lock() = false;
+            self.reapply_tab_size();
         }
     }
 
