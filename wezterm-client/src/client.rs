@@ -1434,6 +1434,12 @@ impl Client {
     rpc!(set_configured_palette_for_pane, SetPalette, UnitResponse);
     rpc!(set_tab_title, TabTitleChanged, UnitResponse);
     rpc!(set_window_title, WindowTitleChanged, UnitResponse);
+    rpc!(set_window_name, SetWindowName, UnitResponse);
+    rpc!(
+        list_window_names,
+        ListWindowNames = (),
+        ListWindowNamesResponse
+    );
     rpc!(rename_workspace, RenameWorkspace, UnitResponse);
     rpc!(erase_scrollback, EraseScrollbackRequest, UnitResponse);
     rpc!(

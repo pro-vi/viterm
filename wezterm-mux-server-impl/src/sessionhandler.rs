@@ -978,6 +978,46 @@ impl SessionHandler {
                 })
                 .detach();
             }
+            Pdu::SetWindowName(SetWindowName { window_id, name }) => {
+                spawn_into_main_thread(async move {
+                    catch(
+                        move || {
+                            let mux = Mux::get();
+                            let mut window = mux
+                                .get_window_mut(window_id)
+                                .ok_or_else(|| anyhow!("no such window {window_id}"))?;
+
+                            window.set_name(&name);
+
+                            Ok(Pdu::UnitResponse(UnitResponse {}))
+                        },
+                        send_response,
+                    )
+                })
+                .detach();
+            }
+            Pdu::ListWindowNames(ListWindowNames {}) => {
+                spawn_into_main_thread(async move {
+                    catch(
+                        move || {
+                            let mux = Mux::get();
+                            let mut names = HashMap::new();
+                            for window_id in mux.iter_windows() {
+                                if let Some(window) = mux.get_window(window_id) {
+                                    if !window.get_name().is_empty() {
+                                        names.insert(window_id, window.get_name().to_string());
+                                    }
+                                }
+                            }
+                            Ok(Pdu::ListWindowNamesResponse(ListWindowNamesResponse {
+                                names,
+                            }))
+                        },
+                        send_response,
+                    )
+                })
+                .detach();
+            }
             Pdu::TabTitleChanged(TabTitleChanged { tab_id, title }) => {
                 spawn_into_main_thread(async move {
                     catch(
@@ -1084,6 +1124,7 @@ impl SessionHandler {
             | Pdu::WindowWorkspaceChanged { .. }
             | Pdu::GetTlsCredsResponse { .. }
             | Pdu::GetClientListResponse { .. }
+            | Pdu::ListWindowNamesResponse { .. }
             | Pdu::PaneRemoved { .. }
             | Pdu::PaneFocused { .. }
             | Pdu::TabResized { .. }

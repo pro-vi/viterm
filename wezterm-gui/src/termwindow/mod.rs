@@ -1402,6 +1402,7 @@ impl TermWindow {
                 | MuxNotification::PaneRemoved(_)
                 | MuxNotification::WindowWorkspaceChanged(_)
                 | MuxNotification::WindowTabOrderChanged(_)
+                | MuxNotification::WindowNameChanged { .. }
                 | MuxNotification::ActiveWorkspaceChanged(_)
                 | MuxNotification::Empty
                 | MuxNotification::WindowCreated(_) => {}
@@ -1610,6 +1611,7 @@ impl TermWindow {
             | MuxNotification::ActiveWorkspaceChanged(_)
             | MuxNotification::WorkspaceRenamed { .. }
             | MuxNotification::Empty
+            | MuxNotification::WindowNameChanged { .. }
             | MuxNotification::WindowWorkspaceChanged(_)
             | MuxNotification::WindowTabOrderChanged(_) => return true,
             MuxNotification::Alert {

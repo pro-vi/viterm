@@ -504,6 +504,9 @@ pdu! {
     GetPaneDirectionResponse: 61,
     AdjustPaneSize: 62,
     SetWindowTabOrder: 63,
+    SetWindowName: 64,
+    ListWindowNames: 65,
+    ListWindowNamesResponse: 66,
 }
 
 impl Pdu {
@@ -786,6 +789,28 @@ pub struct SetWindowWorkspace {
 pub struct SetWindowTabOrder {
     pub window_id: WindowId,
     pub tab_ids: Vec<TabId>,
+}
+
+/// Name a window; an empty name removes its name. Unlike its title, a
+/// window's name is changed only by this request and by `MuxWindow:set_name`,
+/// never by a pane's title escapes. A server that predates window names
+/// answers that the PDU is invalid.
+#[derive(Deserialize, Serialize, PartialEq, Debug)]
+pub struct SetWindowName {
+    pub window_id: WindowId,
+    pub name: String,
+}
+
+/// Asks for the names of the windows that have one. A server that predates
+/// window names answers that the PDU is invalid, so a client can tell a
+/// window with no name from a server that keeps none.
+#[derive(Deserialize, Serialize, PartialEq, Debug)]
+pub struct ListWindowNames {}
+
+/// Only windows that have a name are in `names`.
+#[derive(Deserialize, Serialize, PartialEq, Debug)]
+pub struct ListWindowNamesResponse {
+    pub names: HashMap<WindowId, String>,
 }
 
 #[derive(Deserialize, Serialize, PartialEq, Debug)]

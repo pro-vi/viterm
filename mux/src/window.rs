@@ -13,6 +13,7 @@ pub struct Window {
     last_active_tab_id: Option<TabId>,
     workspace: String,
     title: String,
+    name: String,
     initial_position: Option<GuiPosition>,
 }
 
@@ -25,6 +26,7 @@ impl Window {
             active_tab_idx: 0,
             last_active_tab_id: None,
             title: String::new(),
+            name: String::new(),
             workspace: workspace.unwrap_or_else(|| Mux::get().active_workspace()),
             initial_position,
         }
@@ -56,6 +58,26 @@ impl Window {
     /// Return current title.
     pub fn get_title(&self) -> &str {
         &self.title
+    }
+
+    /// Set the window's name, notifying listeners if it changed. The title
+    /// follows the title escapes of the programs in the window's panes; the
+    /// name changes only when it is set. An empty name means none.
+    pub fn set_name(&mut self, name: &str) {
+        if self.name != name {
+            self.name = name.to_string();
+            if let Some(mux) = Mux::try_get() {
+                mux.notify(MuxNotification::WindowNameChanged {
+                    window_id: self.id,
+                    name: name.to_string(),
+                });
+            }
+        }
+    }
+
+    /// Return the window's name, empty when it has none.
+    pub fn get_name(&self) -> &str {
+        &self.name
     }
 
     /// Set window workspace, notifying listeners if it changed.

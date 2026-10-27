@@ -650,6 +650,25 @@ fn mux_notify_client_domain(local_domain_id: DomainId, notif: MuxNotification) -
                 }
             }
         }
+        MuxNotification::WindowNameChanged { window_id, name } => {
+            if let Some(remote_window_id) = client_domain.local_to_remote_window_id(window_id) {
+                if let Some(inner) = client_domain.inner() {
+                    promise::spawn::spawn(async move {
+                        if let Err(err) = inner
+                            .client
+                            .set_window_name(codec::SetWindowName {
+                                window_id: remote_window_id,
+                                name,
+                            })
+                            .await
+                        {
+                            log::error!("naming remote window {remote_window_id}: {err:#}");
+                        }
+                    })
+                    .detach();
+                }
+            }
+        }
         MuxNotification::WindowTitleChanged {
             window_id,
             title: _,
