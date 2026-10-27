@@ -1,0 +1,20 @@
+Name a window; unlike its title, programs cannot change it
+
+Usage: wezterm cli set-window-name [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>
+          The new name for the window; an empty name removes its name
+
+Options:
+      --window-id <WINDOW_ID>
+          Specify the target window by its id
+
+      --pane-id <PANE_ID>
+          Specify the current pane. The default is to use the current pane based
+          on the environment variable WEZTERM_PANE.
+          
+          The pane is used to figure out which window should be named.
+
+  -h, --help
+          Print help (see a summary with '-h')

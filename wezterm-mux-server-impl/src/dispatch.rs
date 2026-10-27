@@ -190,6 +190,9 @@ where
                     .await?;
                 stream.flush().await.context("flushing PDU to client")?;
             }
+            // Not pushed: a client that predates a pushed PDU drops the
+            // connection. Clients ask for names with ListWindowNames.
+            Ok(Item::Notif(MuxNotification::WindowNameChanged { .. })) => {}
             Ok(Item::Notif(MuxNotification::WorkspaceRenamed {
                 old_workspace,
                 new_workspace,

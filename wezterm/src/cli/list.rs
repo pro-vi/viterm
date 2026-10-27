@@ -19,6 +19,13 @@ impl ListCommand {
 
         let mut output_items = vec![];
         let panes = client.list_panes().await?;
+        // A server that predates window names answers that the request is
+        // invalid; its windows are listed with no name.
+        let window_names = match client.list_window_names().await {
+            Ok(response) => response.names,
+            Err(err) if format!("{err:#}").contains("invalid PDU") => Default::default(),
+            Err(err) => return Err(err),
+        };
 
         for (tabroot, tab_title) in panes.tabs.into_iter().zip(panes.tab_titles.iter()) {
             let mut cursor = tabroot.into_tree().cursor();
@@ -30,10 +37,15 @@ impl ListCommand {
                         .get(&entry.window_id)
                         .map(|s| s.as_str())
                         .unwrap_or("");
+                    let window_name = window_names
+                        .get(&entry.window_id)
+                        .map(|s| s.as_str())
+                        .unwrap_or("");
                     output_items.push(CliListResultItem::from(
                         entry.clone(),
                         tab_title,
                         window_title,
+                        window_name,
                     ));
                 }
                 match cursor.preorder_next() {
@@ -136,13 +148,20 @@ struct CliListResultItem {
     top_row: usize,
     tab_title: String,
     window_title: String,
+    /// Empty when the window has no name
+    window_name: String,
     is_active: bool,
     is_zoomed: bool,
     tty_name: Option<String>,
 }
 
 impl CliListResultItem {
-    fn from(pane: mux::tab::PaneEntry, tab_title: &str, window_title: &str) -> CliListResultItem {
+    fn from(
+        pane: mux::tab::PaneEntry,
+        tab_title: &str,
+        window_title: &str,
+        window_name: &str,
+    ) -> CliListResultItem {
         let mux::tab::PaneEntry {
             window_id,
             tab_id,
@@ -194,6 +213,7 @@ impl CliListResultItem {
             top_row,
             tab_title: tab_title.to_string(),
             window_title: window_title.to_string(),
+            window_name: window_name.to_string(),
             is_active: is_active_pane,
             is_zoomed: is_zoomed_pane,
             tty_name,

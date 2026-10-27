@@ -91,6 +91,10 @@ pub enum MuxNotification {
         window_id: WindowId,
         title: String,
     },
+    WindowNameChanged {
+        window_id: WindowId,
+        name: String,
+    },
     WorkspaceRenamed {
         old_workspace: String,
         new_workspace: String,
