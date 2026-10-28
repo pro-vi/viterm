@@ -4,9 +4,10 @@
 `unit/<slug>` branch, based on `upstream/main`, containing only that change and
 written so it could be sent upstream as it stands. `build` is `upstream/main`
 plus a merge of every active unit, and every local build comes from `build`.
-This file, `BACKLOG.md`, `CLAUDE.md` and `docs/plans/` exist only on `build`;
-`CLAUDE.md` is where the rules live, this file is what they produced. The
-`.inbox/` investigation notes stay local to this machine and are not tracked.
+This file, `BACKLOG.md` and `CLAUDE.md` exist only on `build`; `CLAUDE.md` is
+where the rules live, this file is what they produced. The `.inbox/`
+investigation notes and the `docs/plans/` plans stay local to this machine and
+are not tracked.
 
 A row here means a branch exists: `git branch --list 'unit/*'` and this table
 must name the same units. Work that has no branch yet is in `BACKLOG.md`, and its
