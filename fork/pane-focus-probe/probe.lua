@@ -13,6 +13,21 @@ c.window_close_confirmation = "NeverPrompt"
 -- first split tab active through MuxPane:activate, which calls
 -- Tab::set_active_pane as a click on that pane does. Tries once a second
 -- until the GUI has learned the split tab.
+-- PROBE_INNER_WIDTH resizes every window of this GUI to that many pixels
+-- wide two seconds after attach, so two GUIs hold one tab at different
+-- sizes: a GUI that attaches takes the server's tab size.
+wezterm.on("gui-attached", function(domain)
+  local width = tonumber(os.getenv("PROBE_INNER_WIDTH") or "")
+  if not width then return end
+  wezterm.time.call_after(2, function()
+    for _, win in ipairs(wezterm.gui.gui_windows()) do
+      local dims = win:get_dimensions()
+      win:set_inner_size(width, dims.pixel_height)
+    end
+    wezterm.log_info("probe: resized to " .. width .. " px")
+  end)
+end)
+
 wezterm.on("gui-attached", function(domain)
   local after = tonumber(os.getenv("PROBE_ACTIVATE_AFTER") or "")
   if not after then return end

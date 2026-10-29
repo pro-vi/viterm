@@ -40,8 +40,9 @@ moving GUI lists the spawned tab. On a loaded machine a late answer therefore
 reads as FAIL. In order, the moving GUI's log shows the move with its time.
 WEZTERM_LOG=info,wezterm_client::domain=debug adds a line for each pane list a
 GUI applies. A value with no global level, such as wezterm_client::domain=debug
-alone, drops every other line, the move and the lost-connection errors that a
-check in order reads among them.
+alone, drops every other line: the move, and the lost-connection errors that
+order's check "the other GUI's log has no lost connection" reads, which then
+passes whatever happened.
 """
 import collections, json, os, pathlib, re, subprocess, sys, time
 

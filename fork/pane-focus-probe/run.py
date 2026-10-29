@@ -1,28 +1,33 @@
 #!/usr/bin/env python3
-"""Pane focus probe: does a GUI attached to a mux server keep answering after
-it makes another pane of a split tab active?
+"""Pane focus probe: a throwaway mux server with a tab split in two, and GUIs
+attached to it with `connect`.
 
-    run.py <out-dir> <bin-dir>
+    run.py <scenario> <out-dir> <bin-dir>
 
-bin-dir holds wezterm-gui, wezterm-mux-server and wezterm from one build. The
-server gets a tab split in two; the GUI attaches with `connect` and activates
-the inactive pane through MuxPane:activate; then `wezterm cli list` asks the
-GUI's own socket for its panes. Exit 0 when it answers within 10 s, 1 when it
-does not, and then `sample` writes the GUI's stacks to out-dir/sample.txt.
+Scenarios:
+  activate  one GUI activates the inactive pane through MuxPane:activate,
+            which calls Tab::set_active_pane as a click does, then must
+            answer `wezterm cli list` on its own socket within 10 s; when it
+            does not, `sample` writes its stacks to out-dir/sample.txt
+  follow    two GUIs of different widths show the tab; the first one
+            activates each pane in turn four times, and after each the
+            server must hold both panes at the first GUI's sizes, since
+            that GUI is the one in use
 
+bin-dir holds wezterm-gui, wezterm-mux-server and wezterm from one build.
 out-dir must not exist or be empty, and must have "pane-focus-probe" in its
 path, as probe.lua asserts. The server's socket and its HOME live in it.
 """
-import os, pathlib, subprocess, sys, time
+import json, os, pathlib, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG = os.path.join(HERE, "probe.lua")
 
 
 def main():
-    if len(sys.argv) != 3:
+    if len(sys.argv) != 4 or sys.argv[1] not in ("activate", "follow"):
         sys.exit(__doc__)
-    run, bins = os.path.abspath(sys.argv[1]), sys.argv[2]
+    scenario, run, bins = sys.argv[1], os.path.abspath(sys.argv[2]), sys.argv[3]
     if os.path.isdir(run) and os.listdir(run):
         sys.exit(f"out-dir {run} is not empty; give a new one")
     os.makedirs(run, exist_ok=True)
@@ -56,12 +61,19 @@ def main():
         split = cli("split-pane", "--pane-id", first.stdout.strip(), "--right", "--", "/bin/sleep", "100000")
         if split.returncode != 0:
             sys.exit(f"split-pane: {split.stderr.strip()[:300]}")
-        log_path = os.path.join(run, "gui.log")
-        gui = subprocess.Popen(
-            [os.path.join(bins, "wezterm-gui"), "--config-file", CONFIG, "connect", "probe"],
-            stdout=open(log_path, "w"), stderr=subprocess.STDOUT,
-            env={**env, "PROBE_ACTIVATE_AFTER": "4", "WEZTERM_LOG": "info"})
-        procs.append(gui)
+        def attach(name, extra):
+            log = os.path.join(run, f"{name}.log")
+            gui = subprocess.Popen(
+                [os.path.join(bins, "wezterm-gui"), "--config-file", CONFIG, "connect", "probe"],
+                stdout=open(log, "w"), stderr=subprocess.STDOUT,
+                env={**env, "WEZTERM_LOG": "info", **extra})
+            procs.append(gui)
+            gui.sock = os.path.expanduser(f"~/.local/share/wezterm/gui-sock-{gui.pid}")
+            return gui, log
+
+        if scenario == "follow":
+            sys.exit(follow(cli, attach, first.stdout.strip(), split.stdout.strip()))
+        gui, log_path = attach("gui", {"PROBE_ACTIVATE_AFTER": "4"})
         for _ in range(60):
             log = open(log_path).read()
             if "probe: activating" in log or "probe: no split" in log:
@@ -73,7 +85,7 @@ def main():
             sys.exit("the GUI found no split tab")
         time.sleep(2)
         try:
-            ok = cli("list", to=os.path.expanduser(f"~/.local/share/wezterm/gui-sock-{gui.pid}")).returncode == 0
+            ok = cli("list", to=gui.sock).returncode == 0
         except subprocess.TimeoutExpired:
             ok = False
         returned = "probe: activate returned" in open(log_path).read()
@@ -95,6 +107,50 @@ def main():
         for p in procs[1:]:
             pathlib.Path(os.path.expanduser(f"~/.local/share/wezterm/gui-sock-{p.pid}")).unlink(missing_ok=True)
 
+
+
+def follow(cli, attach, left, right):
+    """Exit status of the follow scenario; left and right are the server's
+    pane ids of the split tab."""
+    def split_sizes(sock=None):
+        """Sizes of the panes of the tab that has two, sorted, and their
+        ids, from the list on sock (the server's when None)."""
+        args = ("list", "--format", "json")
+        r = cli(*args) if sock is None else cli(*args, to=sock)
+        if r.returncode != 0:
+            return None, None
+        tabs = {}
+        for row in json.loads(r.stdout):
+            tabs.setdefault(row["tab_id"], []).append(row)
+        rows = next((t for t in tabs.values() if len(t) == 2), None)
+        if rows is None:
+            return None, None
+        return sorted((row["size"]["cols"], row["size"]["rows"]) for row in rows), [row["pane_id"] for row in rows]
+
+    a, _ = attach("gui-a", {})
+    time.sleep(6)
+    b, _ = attach("gui-b", {"PROBE_INNER_WIDTH": "1600"})
+    time.sleep(6)
+    a_sizes, a_ids = split_sizes(a.sock)
+    b_sizes, _ = split_sizes(b.sock)
+    print(f"first GUI {a_sizes}, second GUI {b_sizes}, server {split_sizes()[0]}")
+    if a_sizes is None or b_sizes is None or a_sizes == b_sizes:
+        print("SETUP: the two GUIs do not hold the split tab at different sizes")
+        return 2
+    held_wrong = 0
+    for turn in range(4):
+        target = a_ids[turn % 2]
+        r = cli("activate-pane", "--pane-id", str(target), to=a.sock)
+        if r.returncode != 0:
+            print(f"FAIL: activate-pane {target}: {r.stderr.strip()[:200]}")
+            return 1
+        time.sleep(3)
+        mine, server = split_sizes(a.sock)[0], split_sizes()[0]
+        ok = mine is not None and mine == server
+        held_wrong += not ok
+        print(f"turn {turn + 1}: first GUI {mine}, server {server}: {'same' if ok else 'DIFFERENT'}")
+    print("PASS" if not held_wrong else f"FAIL: the server held other sizes after {held_wrong} of 4 turns")
+    return 1 if held_wrong else 0
 
 if __name__ == "__main__":
     main()

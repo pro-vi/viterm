@@ -138,6 +138,13 @@ Named `tabbar-title-memo` until 2026-10-02; plans written before then use that n
 - needs: `unit/tab-group-popup-keys`
 - why: Two key paths reach the pane without passing the open tab group modal a chance to close, so the key arrives with the popup or the hints still drawn. Text an input method commits arrives as `Key::Composed`, which no modal sees, so with a Chinese input source on a hint letter does not pick. An Alt key that `send_composed_key_when_left_alt_is_pressed = false` (or the right or generic Alt setting) sends raw is written to the pane by `process_key`'s `bypass_compose` branch after the modal passed it. Found by the gate review of 2026-10-21 and read in `keyevent.rs` at 7cd3ff040, not run. The change: close a tab group modal on either path before the key goes on, as `key_down_unbound` does for an unbound key. Test: with hints shown, committed composed text and a bypassed Alt key each close them and reach the pane once. Signal: none. Promote when hints or the popup are used with an input method on, or when either path is next changed.
 
+### `resize-answer-three-clients`
+
+- side: gui
+- state: proposed
+- needs: `unit/resync-no-resize-echo`
+- why: `RequestedSize::reconcile_server_size` answers a reported size with the pane's own size once per pair of reported and own size, and a report different from the last one arms a new answer. Two clients alternate between two reports, so the pair stops them (`two_clients_at_different_sizes_settle`). Three or more clients holding one pane at three or more sizes do not stop: a test that tried every order of observations by three clients at 25, 30 and 35 rows found orders where every observation sends, 12 sends in 12 steps from each starting size (run on `unit/resync-no-resize-echo` at `f0870e32a`, 2026-10-28, not committed). Each send changes the server's size, which announces `TabResized` to every client, so such an order keeps itself going; how often real resync timing produces it is not measured. Found by the gate review of 2026-10-28 (`build` at `2413d9898`). The change: spend the answer budget only on this client's own events (a layout resize, a focus), not on a different report, and add a three-client test that searches observation orders rather than one rotation. Until then the unit's guarantee is for two clients.
+
 ## Deferred
 
 Decided against for the current topology (one GUI on `human-main`). Not retired; the row returns to Open if the need does.
