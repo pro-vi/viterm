@@ -1407,6 +1407,11 @@ impl Domain for ClientDomain {
                 Some(p) => p.index,
                 None => anyhow::bail!("invalid pane id {pane_id}"),
             };
+            // The wrapper's requests name the tab the server moved it into,
+            // and split_and_insert already resizes it.
+            if let Some(client_pane) = moved.downcast_ref::<ClientPane>() {
+                client_pane.set_remote_tab_id(result.tab_id);
+            }
             tab.split_and_insert(pane_index, split_request, Arc::clone(&moved))?;
             return Ok(moved);
         }
