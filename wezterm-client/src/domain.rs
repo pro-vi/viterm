@@ -611,7 +611,12 @@ impl ClientDomain {
                     remote_panes_to_forget.remove(&entry.pane_id);
                     if let Some(pane_id) = inner.remote_to_local_pane_id(entry.pane_id) {
                         match mux.get_pane(pane_id) {
-                            Some(pane) => pane,
+                            Some(pane) => {
+                                if let Some(client_pane) = pane.downcast_ref::<ClientPane>() {
+                                    client_pane.set_remote_tab_id(entry.tab_id);
+                                }
+                                pane
+                            }
                             None => {
                                 // We likely decided that we hit EOF on the tab and
                                 // removed it from the mux.  Let's add it back, but
@@ -1255,6 +1260,18 @@ mod test {
         assert!(f.mux.get_tab(t2).is_none());
         assert!(f.mux.get_pane(p20).is_some());
         assert_eq!(f.kills_sent(), Vec::<PaneId>::new());
+    }
+
+    /// A pane the server moved keeps its wrapper, which then names the tab
+    /// the server lists it in.
+    #[test]
+    fn a_moved_pane_names_its_new_tab() {
+        let f = Fixture::new();
+        f.resync(pane_list(&[(1, &[10]), (2, &[20])]));
+        f.resync(pane_list(&[(1, &[10, 20])]));
+        let pane = f.mux.get_pane(f.local_pane(20)).unwrap();
+        let pane = pane.downcast_ref::<ClientPane>().unwrap();
+        assert_eq!(pane.remote_tab_id(), 1);
     }
 
     /// A tab whose panes the server no longer lists at all is dropped with
