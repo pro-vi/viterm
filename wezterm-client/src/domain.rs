@@ -230,7 +230,8 @@ impl ClientInner {
             self.set_tab_order_support(TabOrderSupport::No);
         } else if error.contains("unexpected response") {
             // `rpc!` reports every error response as an unexpected response,
-            // an older server's invalid PDU included, so that is checked first.
+            // an older server's invalid PDU included, so the invalid PDU test
+            // above must stay first.
             self.set_tab_order_support(TabOrderSupport::Yes);
         } else {
             log::debug!("set_window_tab_order: {error}");
