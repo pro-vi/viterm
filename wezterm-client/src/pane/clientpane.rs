@@ -48,12 +48,14 @@ pub struct ClientPane {
     user_vars: Mutex<HashMap<String, String>>,
     config: Mutex<Option<Arc<dyn TerminalConfiguration>>>,
     unseen_output: Mutex<bool>,
-    /// The size this client last asked the server to give this pane, or the
-    /// size the server reported when this client took it as the pane's own
-    /// (at creation and in `adopt_server_size`). `resize` sends only a size
-    /// that differs from it. The render dimensions are no guide: the server's
-    /// render updates overwrite them, so they can hold a size the server
-    /// reported after this client had already asked for another.
+    /// Set while this pane applies a focus the server announced, which
+    /// another client caused.
+    applying_server_focus: Mutex<bool>,
+    /// What this client asked the server to give this pane, and what the
+    /// server was last seen holding instead (`RequestedSize`). The render
+    /// dimensions are no guide: the server's render updates overwrite them,
+    /// so they can hold a size the server reported after this client had
+    /// already asked for another.
     requested_size: Arc<Mutex<RequestedSize>>,
     progress: Mutex<Progress>,
 }
@@ -246,6 +248,7 @@ impl ClientPane {
             mouse_grabbed: Mutex::new(false),
             ignore_next_kill: Mutex::new(false),
             unseen_output: Mutex::new(false),
+            applying_server_focus: Mutex::new(false),
             requested_size: Arc::new(Mutex::new(RequestedSize::new(size))),
             user_vars: Mutex::new(HashMap::new()),
             config: Mutex::new(None),
@@ -436,7 +439,10 @@ impl ClientPane {
                 log::trace!("advised of remote pane focus: {pane_id}");
 
                 let mux = Mux::get();
-                if let Err(err) = mux.focus_pane_and_containing_tab(self.local_pane_id) {
+                *self.applying_server_focus.lock() = true;
+                let applied = mux.focus_pane_and_containing_tab(self.local_pane_id);
+                *self.applying_server_focus.lock() = false;
+                if let Err(err) = applied {
                     log::error!("Error reconciling remote PaneFocused notification: {err:#}");
                 }
             }
@@ -737,7 +743,11 @@ impl Pane for ClientPane {
         if focused {
             self.advise_focus();
             *self.unseen_output.lock() = false;
-            self.reapply_tab_size();
+            // A focus the server announced was made in another client,
+            // which is the one in use.
+            if !*self.applying_server_focus.lock() {
+                self.reapply_tab_size();
+            }
         }
     }
 
