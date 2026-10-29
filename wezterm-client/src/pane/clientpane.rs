@@ -49,14 +49,12 @@ pub struct ClientPane {
     user_vars: Mutex<HashMap<String, String>>,
     config: Mutex<Option<Arc<dyn TerminalConfiguration>>>,
     unseen_output: Mutex<bool>,
-    /// Set while this pane applies a focus the server announced, which
-    /// another client caused.
+    /// Set while this pane applies a focus from the server's `PaneFocused`
+    /// announcement.
     applying_server_focus: Mutex<bool>,
-    /// What this client asked the server to give this pane, and what the
-    /// server was last seen holding instead (`RequestedSize`). The render
-    /// dimensions are no guide: the server's render updates overwrite them,
-    /// so they can hold a size the server reported after this client had
-    /// already asked for another.
+    /// This pane's `RequestedSize`. The render dimensions are no guide: the
+    /// server's render updates overwrite them, so they can hold a size the
+    /// server reported after this client had already asked for another.
     requested_size: Arc<Mutex<RequestedSize>>,
     progress: Mutex<Progress>,
 }
@@ -278,10 +276,10 @@ impl ClientPane {
     }
 
     /// Gives the panes of this pane's tab their layout sizes again, as a
-    /// resize of the tab to its own size does. Focus means this client is
-    /// the one in use, so a pane the server was seen holding at another
-    /// client's size asks for this client's size once more; a pane the
-    /// server already holds at its layout size sends nothing.
+    /// resize of the tab to its own size does. A focus made here means this
+    /// client is the one in use, so a pane the server was seen holding at
+    /// another client's size asks for this client's size once more; a pane
+    /// the server already holds at its layout size sends nothing.
     ///
     /// Runs later on the main thread: `Tab::set_active_pane` and
     /// `Tab::set_active_idx` call `focus_changed` with the tab locked, and
@@ -778,8 +776,8 @@ impl Pane for ClientPane {
         if focused {
             self.advise_focus();
             *self.unseen_output.lock() = false;
-            // A focus the server announced was made in another client,
-            // which is the one in use.
+            // A focus applied from the server's announcement does not show
+            // that this client is the one in use; a focus made here does.
             if !*self.applying_server_focus.lock() {
                 self.reapply_tab_size();
             }
