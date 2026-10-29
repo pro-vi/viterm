@@ -278,14 +278,22 @@ impl ClientPane {
     /// the one in use, so a pane the server was seen holding at another
     /// client's size asks for this client's size once more; a pane the
     /// server already holds at its layout size sends nothing.
+    ///
+    /// Runs later on the main thread: `Tab::set_active_pane` and
+    /// `Tab::set_active_idx` call `focus_changed` with the tab locked, and
+    /// finding the tab locks every tab.
     fn reapply_tab_size(&self) {
-        let tab = Mux::try_get().and_then(|mux| {
-            mux.resolve_pane_id(self.local_pane_id)
-                .and_then(|(_, _, tab_id)| mux.get_tab(tab_id))
-        });
-        if let Some(tab) = tab {
-            tab.resize(tab.get_size());
-        }
+        let local_pane_id = self.local_pane_id;
+        promise::spawn::spawn_into_main_thread(async move {
+            let tab = Mux::try_get().and_then(|mux| {
+                mux.resolve_pane_id(local_pane_id)
+                    .and_then(|(_, _, tab_id)| mux.get_tab(tab_id))
+            });
+            if let Some(tab) = tab {
+                tab.resize(tab.get_size());
+            }
+        })
+        .detach();
     }
 
     /// Answers a size the server reported for this pane with the size
