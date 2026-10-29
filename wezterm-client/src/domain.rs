@@ -837,6 +837,14 @@ impl ClientDomain {
         inner.learn_tab_order_support().await;
         let known = inner.known_remote_ids();
         let panes = inner.client.list_panes().await?;
+        // A detach while the list was asked for removed the local windows
+        // this client still maps, so the list is applied only while the
+        // domain holds this same client.
+        let attached = Self::get_client_inner_for_domain(inner.local_domain_id)
+            .map_or(false, |current| Arc::ptr_eq(&current, &inner));
+        if !attached {
+            return Ok(());
+        }
         Self::process_pane_list(inner, panes, None, known)
     }
 
@@ -2202,6 +2210,29 @@ mod test {
         assert!(!after_the_detach
             .iter()
             .any(|pdu| matches!(pdu, Pdu::ListPanes(_))));
+    }
+
+    /// A domain that detaches while a pane list is unanswered applies
+    /// nothing when the list arrives: detach removed the local windows its
+    /// client still maps.
+    #[test]
+    fn a_list_answered_after_a_detach_is_not_applied() {
+        let (f, domain) = Fixture::with_domain();
+        f.inner.set_tab_order_support(TabOrderSupport::Yes);
+        f.resync(pane_list(&[(1, &[10]), (2, &[20])]));
+        let inner = Arc::clone(&f.inner);
+        promise::spawn::spawn(async move { ClientDomain::sync_with_server(inner).await })
+            .detach();
+        f.run_queued();
+
+        domain.perform_detach();
+        f.sent.answer(|pdu| match pdu {
+            Pdu::ListPanes(_) => Ok(Pdu::ListPanesResponse(pane_list(&[(1, &[10]), (2, &[20])]))),
+            _ => Ok(Pdu::UnitResponse(UnitResponse {})),
+        });
+        f.run_queued();
+
+        assert!(f.mux.iter_panes().is_empty());
     }
 
     /// A server that does not take tab orders keeps its own order. A resync
