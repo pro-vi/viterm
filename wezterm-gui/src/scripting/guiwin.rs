@@ -109,6 +109,40 @@ impl UserData for GuiWin {
                 Ok(())
             },
         );
+        methods.add_async_method("toggle_tab_group_popup", |_, this, _: ()| async move {
+            let (tx, rx) = smol::channel::bounded(1);
+            this.window.notify(TermWindowNotif::ToggleTabGroupPopup(tx));
+            rx.recv()
+                .await
+                .map_err(|e| anyhow::anyhow!("{:#}", e))
+                .map_err(luaerr)
+        });
+        methods.add_async_method("show_tab_group_hints", |_, this, _: ()| async move {
+            let (tx, rx) = smol::channel::bounded(1);
+            this.window.notify(TermWindowNotif::ShowTabGroupHints(tx));
+            rx.recv()
+                .await
+                .map_err(|e| anyhow::anyhow!("{:#}", e))
+                .map_err(luaerr)
+        });
+        methods.add_async_method(
+            "open_tab_group_popup",
+            |_, this, tab_index: mlua::Value| async move {
+                let tab_index = parse_tab_index("open_tab_group_popup", tab_index)?;
+                let (tx, rx) = smol::channel::bounded(1);
+                this.window
+                    .notify(TermWindowNotif::OpenTabGroupPopup(tab_index, tx));
+                rx.recv()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{:#}", e))
+                    .map_err(luaerr)
+            },
+        );
+        methods.add_method("set_tab_groups", |_, this, groups: mlua::Value| {
+            let groups = parse_tab_groups(groups)?;
+            this.window.notify(TermWindowNotif::SetTabGroups(groups));
+            Ok(())
+        });
         methods.add_method(
             "set_left_status",
             |_, this, (status, row): (String, Option<usize>)| {
@@ -379,5 +413,196 @@ impl UserData for GuiWin {
                 Ok(result)
             },
         );
+    }
+}
+
+/// A 0-based tab index, as `ActivateTab` takes it. Anything that is not a
+/// non-negative whole number is an error that names the method.
+fn parse_tab_index(method: &str, value: mlua::Value) -> mlua::Result<usize> {
+    match value {
+        mlua::Value::Integer(i) if i >= 0 => Ok(i as usize),
+        mlua::Value::Number(n) if n >= 0. && n.fract() == 0. => Ok(n as usize),
+        _ => Err(mlua::Error::external(format!(
+            "{method}: tab_index must be a whole number, 0 or more"
+        ))),
+    }
+}
+
+/// The groups `window:set_tab_groups` was given: a list of
+/// `{ tabs = {tab_id, ...}, label = "..." }`, each with optional `marks`
+/// and `busy`. Anything else is an error that names the entry, so a
+/// mistake shows in the log instead of as a tab bar
+/// that silently stays as it was.
+fn parse_tab_groups(groups: mlua::Value) -> mlua::Result<Vec<crate::tabbar::TabGroupSpec>> {
+    let fail = |msg: String| mlua::Error::external(format!("set_tab_groups: {msg}"));
+    let groups = match groups {
+        mlua::Value::Table(t) => t,
+        _ => return Err(fail("expected a list of groups".to_string())),
+    };
+    let mut specs = vec![];
+    for (i, entry) in groups.sequence_values::<mlua::Value>().enumerate() {
+        let n = i + 1;
+        let entry = match entry? {
+            mlua::Value::Table(t) => t,
+            _ => return Err(fail(format!("entry {n} is not a table"))),
+        };
+        let label = match entry.get::<_, mlua::Value>("label")? {
+            mlua::Value::String(s) => s.to_str()?.to_string(),
+            _ => return Err(fail(format!("entry {n}: label must be a string"))),
+        };
+        let ids = match entry.get::<_, mlua::Value>("tabs")? {
+            mlua::Value::Table(t) => t,
+            _ => return Err(fail(format!("entry {n}: tabs must be a list of tab ids"))),
+        };
+        let mut tabs = vec![];
+        for id in ids.sequence_values::<mlua::Value>() {
+            match id? {
+                mlua::Value::Integer(id) if id >= 0 => tabs.push(id as mux::tab::TabId),
+                mlua::Value::Number(id) if id >= 0. && id.fract() == 0. => {
+                    tabs.push(id as mux::tab::TabId)
+                }
+                _ => return Err(fail(format!("entry {n}: tabs must be a list of tab ids"))),
+            }
+        }
+        let marks = match entry.get::<_, mlua::Value>("marks")? {
+            mlua::Value::Nil => vec![],
+            mlua::Value::Table(list) => {
+                let bad = || {
+                    fail(format!(
+                        "entry {n}: marks must be a list of {{ tab = tab_id, glyph = text }} for tabs of the group"
+                    ))
+                };
+                let mut marks = vec![];
+                for mark in list.sequence_values::<mlua::Value>() {
+                    let mark = match mark? {
+                        mlua::Value::Table(m) => m,
+                        _ => return Err(bad()),
+                    };
+                    let tab = match mark.get::<_, mlua::Value>("tab")? {
+                        mlua::Value::Integer(id) if id >= 0 => id as mux::tab::TabId,
+                        mlua::Value::Number(id) if id >= 0. && id.fract() == 0. => {
+                            id as mux::tab::TabId
+                        }
+                        _ => return Err(bad()),
+                    };
+                    let glyph = match mark.get::<_, mlua::Value>("glyph")? {
+                        mlua::Value::String(g) if !g.as_bytes().is_empty() => g.to_str()?.to_string(),
+                        _ => return Err(bad()),
+                    };
+                    if !tabs.contains(&tab) {
+                        return Err(bad());
+                    }
+                    marks.push(crate::tabbar::TabGroupMark { tab, glyph });
+                }
+                marks
+            }
+            _ => {
+                return Err(fail(format!(
+                    "entry {n}: marks must be a list of {{ tab = tab_id, glyph = text }} for tabs of the group"
+                )))
+            }
+        };
+        let busy = match entry.get::<_, mlua::Value>("busy")? {
+            mlua::Value::Nil => None,
+            mlua::Value::String(b) => Some(b.to_str()?.to_string()),
+            _ => return Err(fail(format!("entry {n}: busy must be a string"))),
+        };
+        specs.push(crate::tabbar::TabGroupSpec {
+            tabs,
+            label,
+            marks,
+            busy,
+        });
+    }
+    Ok(specs)
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    fn parse(src: &str) -> mlua::Result<Vec<crate::tabbar::TabGroupSpec>> {
+        let lua = mlua::Lua::new();
+        let value: mlua::Value = lua.load(src).eval().unwrap();
+        parse_tab_groups(value)
+    }
+
+    fn index(src: &str) -> mlua::Result<usize> {
+        let lua = mlua::Lua::new();
+        let value: mlua::Value = lua.load(src).eval().unwrap();
+        parse_tab_index("open_tab_group_popup", value)
+    }
+
+    #[test]
+    fn a_tab_index_is_a_whole_number_from_zero() {
+        assert_eq!(index("0").unwrap(), 0);
+        assert_eq!(index("7").unwrap(), 7);
+        assert_eq!(index("7.0").unwrap(), 7);
+    }
+
+    #[test]
+    fn a_tab_index_that_is_negative_fractional_or_not_a_number_is_refused() {
+        for src in ["-1", "1.5", "'3'", "nil", "{}"] {
+            let err = index(src).unwrap_err().to_string();
+            assert!(err.contains("open_tab_group_popup"), "{src}: {err}");
+        }
+    }
+
+    #[test]
+    fn groups_parse_in_order_with_their_tabs_and_labels() {
+        let groups =
+            parse(r#"{ { tabs = { 3, 4 }, label = "p" }, { tabs = {}, label = "q" } }"#).unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].tabs, vec![3, 4]);
+        assert_eq!(groups[0].label, "p");
+        assert!(groups[1].tabs.is_empty());
+    }
+
+    #[test]
+    fn marks_and_busy_parse_with_their_group() {
+        let groups = parse(
+            r#"{ { tabs = { 3, 4 }, label = "p", marks = { { tab = 4, glyph = "!" } }, busy = "o" } }"#,
+        )
+        .unwrap();
+        assert_eq!(groups[0].marks.len(), 1);
+        assert_eq!(groups[0].marks[0].tab, 4);
+        assert_eq!(groups[0].marks[0].glyph, "!");
+        assert_eq!(groups[0].busy.as_deref(), Some("o"));
+    }
+
+    #[test]
+    fn a_mark_outside_its_group_or_without_a_glyph_is_an_error() {
+        for src in [
+            r#"{ { tabs = { 3, 4 }, label = "p", marks = { { tab = 9, glyph = "!" } } } }"#,
+            r#"{ { tabs = { 3, 4 }, label = "p", marks = { { tab = 4 } } } }"#,
+            r#"{ { tabs = { 3, 4 }, label = "p", marks = { { tab = 4, glyph = "" } } } }"#,
+            r#"{ { tabs = { 3, 4 }, label = "p", marks = "!" } }"#,
+            r#"{ { tabs = { 3, 4 }, label = "p", busy = 1 } }"#,
+        ] {
+            let err = parse(src).unwrap_err().to_string();
+            assert!(err.contains("entry 1"), "{src}: {err}");
+        }
+    }
+
+    #[test]
+    fn an_empty_list_clears_the_groups() {
+        assert!(parse("{}").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_bad_entry_is_an_error_that_names_it() {
+        let err = |src: &str| parse(src).unwrap_err().to_string();
+        assert!(
+            err(r#"{ { tabs = { 1 }, label = 3 } }"#).contains("entry 1: label must be a string")
+        );
+        assert!(
+            err(r#"{ { tabs = { 1 }, label = "a" }, { tabs = "x", label = "b" } }"#)
+                .contains("entry 2: tabs must be a list of tab ids")
+        );
+        assert!(
+            err(r#"{ { tabs = { 1.5 }, label = "a" } }"#).contains("entry 1: tabs must be a list")
+        );
+        assert!(err(r#"{ 7 }"#).contains("entry 1 is not a table"));
+        assert!(err(r#""groups""#).contains("expected a list of groups"));
     }
 }

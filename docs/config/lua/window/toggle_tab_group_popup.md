@@ -1,0 +1,47 @@
+# window:toggle_tab_group_popup()
+
+{{since('nightly')}}
+
+Opens the popup of the tab group (see [set_tab_groups](set_tab_groups.md))
+that holds the active tab, or closes the popup when one is open. Returns
+`false` when no popup was open and the active tab is in no group drawn as one
+item, and `true` otherwise.
+
+The popup is what clicking a group's item in the fancy tab bar opens: the
+group's tabs, drawn as the tab bar draws tabs and with the titles they would
+have there, in a box of the tab bar's color with the corners of the tab bar's
+tab shape, next to the item, with a point aimed at the item. It sits over the
+tab bar's rows between the item and the window edge the bar is at, when those rows
+hold it, and otherwise over the bottom (or top) lines of the panes, as with a
+one-row tab bar. The tab bar and the panes do not move.
+
+Each of its tabs is led by a hint: a letter from
+[quick_select_alphabet](../config/quick_select_alphabet.md), in the order of
+the tabs, drawn in the `quick_select_label_fg` and `quick_select_label_bg`
+colors. The tab's own title keeps its number.
+
+Clicking one of its tabs, or pressing its hint, activates that tab and closes
+the popup. Escape, a click outside it, or a second click on the group's item
+closes it; a click in the tab bar closes it and then does what it would have
+done. A key with Cmd, Ctrl or Alt still performs its key assignment with the
+popup open, so `ActivateTab` reaches any tab; one with no key assignment
+closes the popup and goes on to the pane. Any other key closes the popup and
+goes on as it would with no popup: to its key assignment if it has one, else
+to the pane. It closes by itself when its group stops being drawn as one
+item, when another tab becomes active, and when an overlay such as quick
+select opens over the active tab.
+
+Only the fancy tab bar (`use_fancy_tab_bar = true`) draws a group as one item,
+so with the retro tab bar, or with the tab bar hidden, nothing opens.
+
+```lua
+config.keys = {
+  {
+    key = 'F',
+    mods = 'SHIFT|ALT',
+    action = wezterm.action_callback(function(window, pane)
+      window:toggle_tab_group_popup()
+    end),
+  },
+}
+```

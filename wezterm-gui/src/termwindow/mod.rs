@@ -84,6 +84,8 @@ pub mod render;
 pub mod resize;
 mod selection;
 pub mod spawn;
+pub mod tabgrouphints;
+pub mod tabgrouppopup;
 pub mod webgpu;
 use crate::spawn::SpawnWhere;
 use prevcursor::PrevCursorPos;
@@ -126,6 +128,10 @@ pub enum TermWindowNotif {
     },
     SetLeftStatus { status: String, row: usize },
     SetRightStatus { status: String, row: usize },
+    SetTabGroups(Vec<crate::tabbar::TabGroupSpec>),
+    ToggleTabGroupPopup(Sender<bool>),
+    OpenTabGroupPopup(usize, Sender<bool>),
+    ShowTabGroupHints(Sender<bool>),
     GetDimensions(Sender<(Dimensions, WindowState)>),
     GetSelectionForPane {
         pane_id: PaneId,
@@ -156,6 +162,9 @@ pub enum TermWindowNotif {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UIItemType {
     TabBar(TabBarItem),
+    /// A tab group's popup: an entry with the index of the tab it activates,
+    /// or None for the popup's own box around the entries.
+    TabGroupPopup(Option<usize>),
     CloseTab(usize),
     AboveScrollThumb,
     ScrollThumb,
@@ -402,10 +411,16 @@ pub struct TermWindow {
     /// How the last fancy tab bar build fitted the tabs into its rows; None
     /// unless tab_min_width is set.
     pub tab_bar_fit: Option<render::fancy_tab_bar::TabBarFit>,
+    /// Whether `fancy_tab_bar` was built with tab group hints shown.
+    fancy_tab_bar_hinted: bool,
     /// Status text per tab bar row; index 0 is the first row, which is the
     /// only one the retro tab bar and a single-row fancy tab bar can show.
     pub right_status: Vec<String>,
     pub left_status: Vec<String>,
+    /// The groups `window:set_tab_groups` asked the tab bar to fold.
+    tab_groups: Vec<crate::tabbar::TabGroupSpec>,
+    /// The press that closed a tab group popup, whose release is dropped too.
+    popup_dismiss_press: Option<MousePress>,
     last_ui_item: Option<UIItem>,
     /// Tracks whether the current mouse-down event is part of click-focus.
     /// If so, we ignore mouse events until released
@@ -548,6 +563,7 @@ impl TermWindow {
             self.last_mouse_click = None;
             self.current_mouse_buttons.clear();
             self.current_mouse_capture = None;
+            self.popup_dismiss_press = None;
             self.is_click_to_focus_window = false;
 
             for state in self.pane_state.borrow_mut().values_mut() {
@@ -730,8 +746,11 @@ impl TermWindow {
             tab_bar: TabBarState::default(),
             fancy_tab_bar: None,
             tab_bar_fit: None,
+            fancy_tab_bar_hinted: false,
             right_status: vec![String::new()],
             left_status: vec![String::new()],
+            tab_groups: vec![],
+            popup_dismiss_press: None,
             last_mouse_coords: (0, -1),
             window_drag_position: None,
             current_mouse_event: None,
@@ -1210,6 +1229,30 @@ impl TermWindow {
                     self.schedule_next_status_update();
                 }
             }
+            TermWindowNotif::SetTabGroups(groups) => {
+                if groups != self.tab_groups {
+                    self.tab_groups = groups;
+                    self.update_title_post_status();
+                }
+            }
+            TermWindowNotif::ToggleTabGroupPopup(tx) => {
+                let done = self.toggle_tab_group_popup_for_active_tab();
+                tx.try_send(done)
+                    .map_err(chan_err)
+                    .context("send ToggleTabGroupPopup response")?;
+            }
+            TermWindowNotif::OpenTabGroupPopup(tab_idx, tx) => {
+                let done = self.open_tab_group_popup_for_tab(tab_idx);
+                tx.try_send(done)
+                    .map_err(chan_err)
+                    .context("send OpenTabGroupPopup response")?;
+            }
+            TermWindowNotif::ShowTabGroupHints(tx) => {
+                let done = self.show_tab_group_hints();
+                tx.try_send(done)
+                    .map_err(chan_err)
+                    .context("send ShowTabGroupHints response")?;
+            }
             TermWindowNotif::GetDimensions(tx) => {
                 tx.try_send((self.dimensions, self.window_state))
                     .map_err(chan_err)
@@ -1358,6 +1401,8 @@ impl TermWindow {
                 | MuxNotification::WorkspaceRenamed { .. }
                 | MuxNotification::PaneRemoved(_)
                 | MuxNotification::WindowWorkspaceChanged(_)
+                | MuxNotification::WindowTabOrderChanged(_)
+                | MuxNotification::WindowNameChanged { .. }
                 | MuxNotification::ActiveWorkspaceChanged(_)
                 | MuxNotification::Empty
                 | MuxNotification::WindowCreated(_) => {}
@@ -1566,7 +1611,9 @@ impl TermWindow {
             | MuxNotification::ActiveWorkspaceChanged(_)
             | MuxNotification::WorkspaceRenamed { .. }
             | MuxNotification::Empty
-            | MuxNotification::WindowWorkspaceChanged(_) => return true,
+            | MuxNotification::WindowNameChanged { .. }
+            | MuxNotification::WindowWorkspaceChanged(_)
+            | MuxNotification::WindowTabOrderChanged(_) => return true,
             MuxNotification::Alert {
                 alert: Alert::PaletteChanged { .. },
                 ..
@@ -1912,6 +1959,181 @@ impl TermWindow {
         }
     }
 
+    /// A tab of the group whose popup is open, if one is.
+    fn open_popup_tab(&self) -> Option<mux::tab::TabId> {
+        self.get_modal().and_then(|modal| {
+            modal
+                .downcast_ref::<tabgrouppopup::TabGroupPopup>()
+                .map(|popup| popup.tab_id)
+        })
+    }
+
+    /// Opens the popup of folded group `group_idx`, or closes it when it is
+    /// the one open; another group's popup is replaced.
+    pub fn toggle_tab_group_popup(&mut self, group_idx: usize) {
+        let ids = match self.tab_bar.folded().get(group_idx) {
+            Some(group) => group.ids.clone(),
+            None => return,
+        };
+        if self
+            .open_popup_tab()
+            .map_or(false, |open| ids.contains(&open))
+        {
+            self.close_tab_group_popup();
+            return;
+        }
+        if let Some(&tab_id) = ids.first() {
+            let opened_on = self.active_tab_id();
+            self.set_modal(Rc::new(tabgrouppopup::TabGroupPopup::new(
+                tab_id, None, opened_on,
+            )));
+            self.invalidate_fancy_tab_bar();
+        }
+    }
+
+    fn tab_group_hints_open(&self) -> bool {
+        self.get_modal().map_or(false, |modal| {
+            modal
+                .downcast_ref::<tabgrouphints::TabGroupHints>()
+                .is_some()
+        })
+    }
+
+    /// Whether a modal other than the tab group popup or hints is open, such
+    /// as the command palette, which the tab group methods leave alone.
+    fn other_modal_open(&self) -> bool {
+        self.get_modal().is_some()
+            && self.open_popup_tab().is_none()
+            && !self.tab_group_hints_open()
+    }
+
+    /// What window:show_tab_group_hints does: shows a hint on each folded
+    /// group, in place of an open group popup. False, with nothing changed,
+    /// when the hints are already shown, when no group is folded or the
+    /// alphabet gives no hint, or when another kind of modal is open.
+    fn show_tab_group_hints(&mut self) -> bool {
+        if self.tab_group_hints_open() || self.other_modal_open() {
+            return false;
+        }
+        let count = self.tab_bar.folded().len();
+        if tabgrouppopup::hints(&self.config.quick_select_alphabet, count).is_empty() {
+            return false;
+        }
+        let opened_on = self.active_tab_id();
+        self.set_modal(Rc::new(tabgrouphints::TabGroupHints::new(opened_on)));
+        self.invalidate_fancy_tab_bar();
+        true
+    }
+
+    pub fn close_tab_group_hints(&mut self) {
+        if self.tab_group_hints_open() {
+            self.cancel_modal();
+            self.invalidate_fancy_tab_bar();
+        }
+    }
+
+    fn active_tab_id(&self) -> Option<mux::tab::TabId> {
+        Mux::get()
+            .get_window(self.mux_window_id)
+            .and_then(|window| window.get_active_tab().map(|tab| tab.tab_id()))
+    }
+
+    /// Whether an overlay, such as quick select or a prompt, is over this
+    /// window's active tab.
+    pub fn active_tab_has_overlay(&self) -> bool {
+        Mux::get()
+            .get_active_tab_for_window(self.mux_window_id)
+            .map_or(false, |tab| self.tab_state(tab.tab_id()).overlay.is_some())
+    }
+
+    /// What window:open_tab_group_popup does: opens the popup of the folded
+    /// group holding the tab at `tab_idx`, with that tab marked, replacing a
+    /// popup another group has open. False when that tab is in no folded
+    /// group or its group's popup is already open, closing an open popup,
+    /// since the caller then goes to the tab; false with nothing changed when
+    /// another kind of modal is open.
+    fn open_tab_group_popup_for_tab(&mut self, tab_idx: usize) -> bool {
+        if self.other_modal_open() {
+            return false;
+        }
+        let group = self
+            .tab_bar
+            .folded()
+            .iter()
+            .find(|group| group.tabs.contains(&tab_idx));
+        let marked = match group {
+            Some(group)
+                if !self
+                    .open_popup_tab()
+                    .map_or(false, |open| group.ids.contains(&open)) =>
+            {
+                group.ids[tab_idx - group.tabs.start]
+            }
+            _ => {
+                self.close_tab_group_popup();
+                self.close_tab_group_hints();
+                return false;
+            }
+        };
+        // The popup names its group by the marked tab, so the mark is in the
+        // group it lists however the tabs regroup.
+        let opened_on = self.active_tab_id();
+        self.set_modal(Rc::new(tabgrouppopup::TabGroupPopup::new(
+            marked,
+            Some(marked),
+            opened_on,
+        )));
+        self.invalidate_fancy_tab_bar();
+        true
+    }
+
+    pub fn close_tab_group_popup(&mut self) {
+        if self.open_popup_tab().is_some() {
+            self.cancel_modal();
+        }
+    }
+
+    /// Hands the open popup what a tab bar build laid out for it, or closes
+    /// it when the build found nothing to lay out.
+    pub fn set_tab_group_popup_layout(&mut self, layout: Option<Vec<box_model::ComputedElement>>) {
+        let Some(modal) = self.get_modal() else {
+            return;
+        };
+        let Some(popup) = modal.downcast_ref::<tabgrouppopup::TabGroupPopup>() else {
+            return;
+        };
+        match layout {
+            Some(elements) => popup.set_elements(elements),
+            None => self.cancel_modal(),
+        }
+    }
+
+    /// What window:toggle_tab_group_popup does: closes the popup that is
+    /// open, else opens the popup of the folded group holding the active tab.
+    /// False when no popup was open and the active tab is in no folded group.
+    fn toggle_tab_group_popup_for_active_tab(&mut self) -> bool {
+        if self.open_popup_tab().is_some() {
+            self.close_tab_group_popup();
+            return true;
+        }
+        let active = Mux::get()
+            .get_window(self.mux_window_id)
+            .map(|window| window.get_active_tab_idx());
+        let group = active.and_then(|idx| {
+            self.tab_bar
+                .folded()
+                .iter()
+                .position(|group| group.tabs.contains(&idx))
+        });
+        match group {
+            Some(group_idx) => {
+                self.toggle_tab_group_popup(group_idx);
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn set_modal(&self, modal: Rc<dyn Modal>) {
         self.modal.borrow_mut().replace(modal);
         if let Some(window) = self.window.as_ref() {
@@ -2092,6 +2314,13 @@ impl TermWindow {
             &self.config,
             &self.left_status,
             &self.right_status,
+            // Only the fancy tab bar draws a group as one item and opens its
+            // popup; with the retro tab bar, or none, every tab is drawn.
+            if self.config.use_fancy_tab_bar && self.config.enable_tab_bar {
+                &self.tab_groups
+            } else {
+                &[]
+            },
         );
         if new_tab_bar != self.tab_bar {
             self.tab_bar = new_tab_bar;
@@ -2099,6 +2328,37 @@ impl TermWindow {
             self.invalidate_modal();
             if let Some(window) = self.window.as_ref() {
                 window.invalidate();
+            }
+        }
+        // A popup lists one group's tabs; it closes once that group no longer
+        // folds, once another tab is active than when it opened, and once an
+        // overlay covers the active tab.
+        if let Some(open) = self.open_popup_tab() {
+            let opened_on = self.get_modal().and_then(|modal| {
+                modal
+                    .downcast_ref::<tabgrouppopup::TabGroupPopup>()
+                    .map(|popup| popup.opened_on)
+            });
+            if self.tab_bar.folded_group_of(open).is_none()
+                || opened_on.map_or(false, |on| on != self.active_tab_id())
+                || self.active_tab_has_overlay()
+            {
+                self.close_tab_group_popup();
+            }
+        }
+        // The hints close once no group folds, once another tab is active
+        // than when they opened, and once an overlay covers the active tab.
+        let hints_opened_on = self.get_modal().and_then(|modal| {
+            modal
+                .downcast_ref::<tabgrouphints::TabGroupHints>()
+                .map(|hints| hints.opened_on)
+        });
+        if let Some(on) = hints_opened_on {
+            if self.tab_bar.folded().is_empty()
+                || on != self.active_tab_id()
+                || self.active_tab_has_overlay()
+            {
+                self.close_tab_group_hints();
             }
         }
 
@@ -2359,6 +2619,9 @@ impl TermWindow {
         window.set_active_tab_idx_without_saving(tab_idx);
 
         drop(window);
+        if tab_idx != active_tab_idx {
+            mux.notify(MuxNotification::WindowTabOrderChanged(self.mux_window_id));
+        }
         self.update_title();
         self.update_scrollbar();
 

@@ -13,6 +13,7 @@ pub struct Window {
     last_active_tab_id: Option<TabId>,
     workspace: String,
     title: String,
+    name: String,
     initial_position: Option<GuiPosition>,
 }
 
@@ -25,6 +26,7 @@ impl Window {
             active_tab_idx: 0,
             last_active_tab_id: None,
             title: String::new(),
+            name: String::new(),
             workspace: workspace.unwrap_or_else(|| Mux::get().active_workspace()),
             initial_position,
         }
@@ -58,6 +60,26 @@ impl Window {
         &self.title
     }
 
+    /// Set the window's name, notifying listeners if it changed. The title
+    /// follows the title escapes of the programs in the window's panes; the
+    /// name changes only when it is set. An empty name means none.
+    pub fn set_name(&mut self, name: &str) {
+        if self.name != name {
+            self.name = name.to_string();
+            if let Some(mux) = Mux::try_get() {
+                mux.notify(MuxNotification::WindowNameChanged {
+                    window_id: self.id,
+                    name: name.to_string(),
+                });
+            }
+        }
+    }
+
+    /// Return the window's name, empty when it has none.
+    pub fn get_name(&self) -> &str {
+        &self.name
+    }
+
     /// Set window workspace, notifying listeners if it changed.
     pub fn set_workspace(&mut self, workspace: &str) {
         if workspace == self.workspace {
@@ -81,8 +103,9 @@ impl Window {
     /// Notify that this window's tab layout has changed (add/remove/reorder),
     /// so listeners can refresh any cached view of it.
     fn invalidate(&self) {
-        let mux = Mux::get();
-        mux.notify(MuxNotification::WindowInvalidated(self.id));
+        if let Some(mux) = Mux::try_get() {
+            mux.notify(MuxNotification::WindowInvalidated(self.id));
+        }
     }
 
     /// Insert `tab` in window, at given index.
@@ -244,6 +267,40 @@ impl Window {
         self.tabs.iter()
     }
 
+    /// Put the tabs that `order` names into that order, in the places those
+    /// tabs hold now; a tab it does not name keeps its place, and an id that
+    /// is not in this window is ignored. The active tab stays active.
+    /// Returns true if any tab moved. Like the other tab changes here, it
+    /// raises only WindowInvalidated; the caller raises
+    /// WindowTabOrderChanged, unless it applies an order its server reported.
+    pub fn set_tab_order(&mut self, order: &[TabId]) -> bool {
+        let rank = |tab: &Arc<Tab>| order.iter().position(|id| *id == tab.tab_id());
+        let places: Vec<usize> = (0..self.tabs.len())
+            .filter(|&idx| rank(&self.tabs[idx]).is_some())
+            .collect();
+        let mut named: Vec<Arc<Tab>> = places
+            .iter()
+            .map(|&idx| Arc::clone(&self.tabs[idx]))
+            .collect();
+        named.sort_by_key(rank);
+
+        let active = self.get_active_tab().map(|tab| tab.tab_id());
+        let mut moved = false;
+        for (idx, tab) in places.into_iter().zip(named) {
+            if self.tabs[idx].tab_id() != tab.tab_id() {
+                self.tabs[idx] = tab;
+                moved = true;
+            }
+        }
+        if moved {
+            if let Some(idx) = active.and_then(|id| self.get_tab_idx_for_id(id)) {
+                self.active_tab_idx = idx;
+            }
+            self.invalidate();
+        }
+        moved
+    }
+
     /// Remove dead tabs, and any tabs not present in given `live_tab_ids`.
     pub fn prune_dead_tabs(&mut self, live_tab_ids: &[TabId]) {
         let mut invalidated = false;
@@ -291,5 +348,47 @@ impl Window {
         if invalidated {
             self.invalidate();
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use wezterm_term::TerminalSize;
+
+    /// A window of `count` new tabs, with no mux: a workspace given to
+    /// `Window::new` is not looked up, and nothing is notified.
+    fn window_of(count: usize) -> (Window, Vec<TabId>) {
+        let mut window = Window::new(Some(String::new()), None);
+        for _ in 0..count {
+            window.push_tab(&Arc::new(Tab::new(&TerminalSize::default())));
+        }
+        let ids = window.tabs.iter().map(|tab| tab.tab_id()).collect();
+        (window, ids)
+    }
+
+    fn order(window: &Window) -> Vec<TabId> {
+        window.iter_tabs().map(|tab| tab.tab_id()).collect()
+    }
+
+    #[test]
+    fn set_tab_order_moves_the_named_tabs_and_keeps_the_active_one() {
+        let (mut window, t) = window_of(4);
+
+        assert!(window.set_tab_order(&[t[2], t[0], t[1], t[3]]));
+
+        assert_eq!(order(&window), vec![t[2], t[0], t[1], t[3]]);
+        assert_eq!(window.get_active_tab().unwrap().tab_id(), t[0]);
+        assert!(!window.set_tab_order(&[t[2], t[0], t[1], t[3]]));
+    }
+
+    #[test]
+    fn set_tab_order_leaves_unnamed_tabs_in_place() {
+        let (mut window, t) = window_of(4);
+        let unknown = t[3] + 1000;
+
+        assert!(window.set_tab_order(&[t[2], unknown, t[0], t[2]]));
+
+        assert_eq!(order(&window), vec![t[2], t[1], t[0], t[3]]);
     }
 }

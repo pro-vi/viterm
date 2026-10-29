@@ -87,6 +87,12 @@ As features stabilize some brief notes about them will accumulate here.
   shape, spacing and active-tab marker of the fancy tab bar's tabs, and
   whether a background color set by `format-tab-title` fills the tab or
   colors its title.
+* Kitty graphics protocol: support for [Unicode
+  placeholders](https://sw.kovidgoyal.net/kitty/graphics-protocol/#unicode-placeholders):
+  virtual placements (`U=1`) and `U+10EEEE` placeholder cells. Programs that
+  position images through the text grid (eg: `textual-image`, `ratatui-image`)
+  now display them in the right place instead of at the cursor position, and
+  the placeholder character is no longer passed through to font rendering.
 * [command_palette_line_height](config/lua/config/command_palette_line_height.md)
   option to scale the vertical spacing of rows in the command palette,
   independently of [line_height](config/lua/config/line_height.md) which is for terminal cells only.
@@ -178,6 +184,23 @@ As features stabilize some brief notes about them will accumulate here.
 - The mux server observes client EOF before queued pane notifications, preserves buffered request bytes, and skips queued render work after disconnect.
 
 * Mux connections receive pane output and alerts only after asking for render changes. One request activates the whole connection, preserving background-pane updates; CLI replies and subscribed key-input echo retain their behavior.
+* Multiplexer: moving a tab with [`MoveTab`](./config/lua/keyassignment/MoveTab.md)
+  or [`MoveTabRelative`](./config/lua/keyassignment/MoveTabRelative.md) in a
+  `wezterm connect` client changed the order in that client only; it was lost
+  on reattach, and other clients of the same server did not see it. The move
+  is now sent to the server, and clients of this version show the server's
+  order. A server that predates this keeps its order, and the move stays
+  local as before. #5339
+* Multiplexer: a `wezterm connect` client kept showing a tab that the server
+  had removed, for example after `wezterm cli split-pane --move-pane-id` moved
+  the tab's only pane into another tab; the moved pane then appeared in both
+  tabs, and closing the stale tab killed it. The client now removes such a
+  tab without killing its panes. #6210
+* Multiplexer: a split made on the server, or a pane moved into a tab with
+  `wezterm cli split-pane --move-pane-id`, reached the other `wezterm connect`
+  clients only at their next resync for some other reason, unless it was a
+  split across a whole tab of several panes, which the resize it caused
+  announced. The server now announces every split at once.
 * macOS: Fix window border when opacity<1 and shadow enabled.
   Thanks to @Adams-Galaxy! #8038 #5158
 * perf: Terminal images were hashed three times each on the transmit path; the sha256

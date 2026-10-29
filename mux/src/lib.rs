@@ -62,6 +62,10 @@ pub enum MuxNotification {
     WindowRemoved(WindowId),
     WindowInvalidated(WindowId),
     WindowWorkspaceChanged(WindowId),
+    /// A window's tabs were put in a new order. A client that applies the
+    /// order its server reports does not raise this, so that the order is
+    /// not sent back.
+    WindowTabOrderChanged(WindowId),
     ActiveWorkspaceChanged(Arc<ClientId>),
     Alert {
         pane_id: PaneId,
@@ -90,6 +94,10 @@ pub enum MuxNotification {
     WindowTitleChanged {
         window_id: WindowId,
         title: String,
+    },
+    WindowNameChanged {
+        window_id: WindowId,
+        name: String,
     },
     WorkspaceRenamed {
         old_workspace: String,
@@ -835,9 +843,9 @@ impl Mux {
         }
     }
 
-    fn remove_tab_internal(&self, tab_id: TabId) -> Option<Arc<Tab>> {
-        log::debug!("remove_tab_internal tab {}", tab_id);
-
+    /// Take the tab out of the mux and out of its window, leaving its panes
+    /// in the mux.
+    fn take_tab(&self, tab_id: TabId) -> Option<Arc<Tab>> {
         let tab = self.tabs.write().remove(&tab_id)?;
 
         if let Some(mut windows) = self.windows.try_write() {
@@ -845,6 +853,14 @@ impl Mux {
                 w.remove_tab_id(tab_id);
             }
         }
+
+        Some(tab)
+    }
+
+    fn remove_tab_internal(&self, tab_id: TabId) -> Option<Arc<Tab>> {
+        log::debug!("remove_tab_internal tab {}", tab_id);
+
+        let tab = self.take_tab(tab_id)?;
 
         let mut pane_ids = vec![];
         for pos in tab.iter_panes_ignoring_zoom() {
@@ -903,6 +919,17 @@ impl Mux {
         let tab = self.remove_tab_internal(tab_id);
         self.prune_dead_windows();
         tab
+    }
+
+    /// Remove a tab without removing or killing its panes. A client domain
+    /// uses this for a tab that the server no longer has: the server may have
+    /// moved its panes into other tabs, which still show them.
+    pub fn remove_tab_keep_panes(&self, tab_id: TabId) -> Option<Arc<Tab>> {
+        log::debug!("remove_tab_keep_panes tab {}", tab_id);
+        let tab = self.take_tab(tab_id)?;
+        self.recompute_pane_count();
+        self.prune_dead_windows();
+        Some(tab)
     }
 
     pub fn prune_dead_windows(&self) {

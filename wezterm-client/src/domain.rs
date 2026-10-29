@@ -42,6 +42,16 @@ pub(crate) fn is_applying_pane_list() -> bool {
     APPLYING_PANE_LIST.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// What a client knew before it asked the server for its pane list: the
+/// remote ids it had copies of, and how many tab moves it had queued.
+#[derive(Default)]
+struct KnownRemoteIds {
+    windows: HashSet<WindowId>,
+    tabs: HashSet<TabId>,
+    panes: HashSet<PaneId>,
+    tab_moves_queued: u64,
+}
+
 pub struct ClientInner {
     pub client: Client,
     pub local_domain_id: DomainId,
@@ -50,7 +60,33 @@ pub struct ClientInner {
     remote_to_local_window: Mutex<HashMap<WindowId, WindowId>>,
     remote_to_local_tab: Mutex<HashMap<TabId, TabId>>,
     remote_to_local_pane: Mutex<HashMap<PaneId, PaneId>>,
+    tab_order_support: Mutex<TabOrderSupport>,
+    /// The tab moves made in this client's windows, and those whose
+    /// requests are queued for the server. A pane list shows the server's
+    /// order only when every move made has been queued and none was queued
+    /// after the list was asked for: the server answers one client's
+    /// requests in order, so that list reflects every move. A move that
+    /// sends nothing stops counting as made, since no list can predate it.
+    tab_moves: Mutex<TabMoves>,
+    /// Set when a pane list's tab order was not shown because of a move
+    /// made here; the order is read again once every move is queued.
+    tab_order_skipped: Mutex<bool>,
     pub focused_remote_pane_id: Mutex<Option<PaneId>>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct TabMoves {
+    made: u64,
+    queued: u64,
+}
+
+/// Whether the server takes `SetWindowTabOrder`, which a client learns once
+/// per connection by sending it an empty order, or from a move it refuses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TabOrderSupport {
+    Unknown,
+    Yes,
+    No,
 }
 
 impl ClientInner {
@@ -134,6 +170,162 @@ impl ClientInner {
         None
     }
 
+    /// The remote windows mapped to a local window. Usually one; two spawns
+    /// into a window that has no remote window yet each get one.
+    fn remote_windows_of(&self, local_window_id: WindowId) -> Vec<WindowId> {
+        self.remote_to_local_window
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, local)| **local == local_window_id)
+            .map(|(remote, _)| *remote)
+            .collect()
+    }
+
+    /// The order of a local window's tabs, in remote ids, as one request for
+    /// each of `remote_windows`, since each server window orders only its
+    /// own tabs; none when the local window is gone.
+    fn tab_order_requests(
+        &self,
+        local_window_id: WindowId,
+        remote_windows: &[WindowId],
+    ) -> Vec<codec::SetWindowTabOrder> {
+        let mux = Mux::get();
+        let tab_ids: Vec<TabId> = match mux.get_window(local_window_id) {
+            Some(window) => window
+                .iter_tabs()
+                .filter_map(|tab| self.local_to_remote_tab(tab.tab_id()))
+                .collect(),
+            None => return vec![],
+        };
+        remote_windows
+            .iter()
+            .map(|window_id| codec::SetWindowTabOrder {
+                window_id: *window_id,
+                tab_ids: tab_ids.clone(),
+            })
+            .collect()
+    }
+
+    fn tab_order_support(&self) -> TabOrderSupport {
+        *self.tab_order_support.lock().unwrap()
+    }
+
+    fn set_tab_order_support(&self, support: TabOrderSupport) {
+        *self.tab_order_support.lock().unwrap() = support;
+    }
+
+    /// Learn whether the server takes tab orders, unless that is known, with
+    /// an empty order for a remote window this client already maps: that
+    /// moves nothing on a server that takes the request. Any answer settles
+    /// it (see `note_tab_order_refusal`); only a request that got no answer
+    /// leaves it to the next sync.
+    async fn learn_tab_order_support(&self) {
+        if self.tab_order_support() != TabOrderSupport::Unknown {
+            return;
+        }
+        let window_id = match self.remote_to_local_window.lock().unwrap().keys().next() {
+            Some(window_id) => *window_id,
+            None => return,
+        };
+        let answer = self
+            .client
+            .set_window_tab_order(codec::SetWindowTabOrder {
+                window_id,
+                tab_ids: vec![],
+            })
+            .await;
+        match answer {
+            Ok(_) => self.set_tab_order_support(TabOrderSupport::Yes),
+            Err(err) => self.note_tab_order_refusal(&err),
+        }
+    }
+
+    /// A server that predates `SetWindowTabOrder` cannot decode it and
+    /// answers that the PDU is invalid; it is not sent another, and the log
+    /// says so once. Any other error the server answers, such as that the
+    /// window is gone, shows that it decoded the request, so it takes tab
+    /// orders.
+    fn note_tab_order_refusal(&self, err: &anyhow::Error) {
+        let error = format!("{err:#}");
+        if error.contains("invalid PDU") {
+            if self.tab_order_support() != TabOrderSupport::No {
+                log::info!("the mux server predates tab orders; tab moves here stay local");
+            }
+            self.set_tab_order_support(TabOrderSupport::No);
+        } else if error.contains("unexpected response") {
+            // `rpc!` reports every error response as an unexpected response,
+            // an older server's invalid PDU included, so the invalid PDU test
+            // above must stay first.
+            self.set_tab_order_support(TabOrderSupport::Yes);
+        } else {
+            log::debug!("set_window_tab_order: {error}");
+        }
+    }
+
+    fn tab_moves(&self) -> TabMoves {
+        *self.tab_moves.lock().unwrap()
+    }
+
+    /// Count a tab move made here. Done when the move is made, before
+    /// anything is deferred, so that a pane list asked for earlier and
+    /// applied in between does not put the old order back.
+    fn count_tab_move(&self) {
+        self.tab_moves.lock().unwrap().made += 1;
+    }
+
+    /// Send the order of a moved local window to `remote_windows`, unless
+    /// the server is known to predate the request, for a move counted with
+    /// `count_tab_move`. A move with requests counts as queued in the same
+    /// poll that queues every one of them, which are started together so
+    /// that none waits behind an answer; a pane list asked for afterwards is
+    /// behind all of them on the wire. A move with none stops counting as
+    /// made.
+    async fn send_tab_orders(&self, local_window_id: WindowId, remote_windows: Vec<WindowId>) {
+        let requests = if self.tab_order_support() == TabOrderSupport::No {
+            vec![]
+        } else {
+            self.tab_order_requests(local_window_id, &remote_windows)
+        };
+        {
+            let mut moves = self.tab_moves.lock().unwrap();
+            debug_assert!(
+                moves.made > moves.queued,
+                "a tab move sent without being counted"
+            );
+            if requests.is_empty() {
+                moves.made -= 1;
+            } else {
+                moves.queued += 1;
+            }
+        }
+        let answers = futures::future::join_all(
+            requests
+                .into_iter()
+                .map(|request| self.client.set_window_tab_order(request)),
+        )
+        .await;
+        for err in answers.into_iter().filter_map(Result::err) {
+            self.note_tab_order_refusal(&err);
+        }
+        // A list read while moves were in flight did not show the server's
+        // order; read it again once every move is queued, so the new list is
+        // behind every queued request. The server's own notice of a reorder
+        // does not cover this: it sends none for a move that changed nothing
+        // or that it refused. The client is taken from the domain, as for
+        // every other sync, so that nothing is read once it has detached.
+        let moves = self.tab_moves();
+        if moves.made == moves.queued
+            && std::mem::take(&mut *self.tab_order_skipped.lock().unwrap())
+        {
+            if let Ok(inner) = ClientDomain::get_client_inner_for_domain(self.local_domain_id) {
+                if let Err(err) = ClientDomain::sync_with_server(inner).await {
+                    log::debug!("reading the tab order again: {err:#}");
+                }
+            }
+        }
+    }
+
     fn local_to_remote_window(&self, local_window_id: WindowId) -> Option<WindowId> {
         let map = self.remote_to_local_window.lock().unwrap();
         for (remote, local) in map.iter() {
@@ -193,6 +385,39 @@ impl ClientInner {
     pub fn remote_to_local_tab_id(&self, remote_tab_id: TabId) -> Option<TabId> {
         let map = self.remote_to_local_tab.lock().unwrap();
         map.get(&remote_tab_id).copied()
+    }
+
+    /// The remote ids this client has local copies of, and how many tab
+    /// moves it has queued, taken before it asks the server for its pane
+    /// list. An id in here that the list leaves out was removed on the
+    /// server. An id the client learned of while the request was in flight,
+    /// such as a tab whose spawn reply arrived first, is missing from the
+    /// list only because the list is older, and is not in here.
+    fn known_remote_ids(&self) -> KnownRemoteIds {
+        KnownRemoteIds {
+            windows: self
+                .remote_to_local_window
+                .lock()
+                .unwrap()
+                .keys()
+                .copied()
+                .collect(),
+            tabs: self
+                .remote_to_local_tab
+                .lock()
+                .unwrap()
+                .keys()
+                .copied()
+                .collect(),
+            panes: self
+                .remote_to_local_pane
+                .lock()
+                .unwrap()
+                .keys()
+                .copied()
+                .collect(),
+            tab_moves_queued: self.tab_moves().queued,
+        }
     }
 
     pub fn is_local(&self) -> bool {
@@ -270,6 +495,9 @@ impl ClientInner {
             remote_to_local_window: Mutex::new(HashMap::new()),
             remote_to_local_tab: Mutex::new(HashMap::new()),
             remote_to_local_pane: Mutex::new(HashMap::new()),
+            tab_order_support: Mutex::new(TabOrderSupport::Unknown),
+            tab_moves: Mutex::new(TabMoves::default()),
+            tab_order_skipped: Mutex::new(false),
             focused_remote_pane_id: Mutex::new(None),
         }
     }
@@ -423,6 +651,25 @@ fn mux_notify_client_domain(local_domain_id: DomainId, notif: MuxNotification) -
                 }
             }
         }
+        MuxNotification::WindowNameChanged { window_id, name } => {
+            if let Some(remote_window_id) = client_domain.local_to_remote_window_id(window_id) {
+                if let Some(inner) = client_domain.inner() {
+                    promise::spawn::spawn(async move {
+                        if let Err(err) = inner
+                            .client
+                            .set_window_name(codec::SetWindowName {
+                                window_id: remote_window_id,
+                                name,
+                            })
+                            .await
+                        {
+                            log::error!("naming remote window {remote_window_id}: {err:#}");
+                        }
+                    })
+                    .detach();
+                }
+            }
+        }
         MuxNotification::WindowTitleChanged {
             window_id,
             title: _,
@@ -454,6 +701,20 @@ fn mux_notify_client_domain(local_domain_id: DomainId, notif: MuxNotification) -
                             }
                         }
                         anyhow::Result::<()>::Ok(())
+                    })
+                    .detach();
+                }
+            }
+        }
+        MuxNotification::WindowTabOrderChanged(window_id) => {
+            if let Some(inner) = client_domain.inner() {
+                let remote_windows = inner.remote_windows_of(window_id);
+                if !remote_windows.is_empty() {
+                    inner.count_tab_move();
+                    // Deferred, since sending awaits the server's answers and
+                    // a mux subscriber returns at once
+                    promise::spawn::spawn_into_main_thread(async move {
+                        inner.send_tab_orders(window_id, remote_windows).await;
                     })
                     .detach();
                 }
@@ -552,9 +813,9 @@ impl ClientDomain {
     /// the set of tabs since we were connected, so we need to re-sync.
     pub async fn reattach(domain_id: DomainId, ui: ConnectionUI) -> anyhow::Result<()> {
         let inner = Self::get_client_inner_for_domain(domain_id)?;
-
-        let panes = inner.client.list_panes().await?;
-        Self::process_pane_list(inner, panes, None)?;
+        // The server may have been replaced while the connection was down.
+        inner.set_tab_order_support(TabOrderSupport::Unknown);
+        Self::sync_with_server(inner).await?;
 
         ui.close();
         Ok(())
@@ -563,12 +824,29 @@ impl ClientDomain {
     pub async fn resync(&self) -> anyhow::Result<()> {
         if let Some(inner) = self.inner() {
             let started = std::time::Instant::now();
-            let panes = inner.client.list_panes().await?;
-            Self::process_pane_list(inner, panes, None)?;
+            Self::sync_with_server(inner).await?;
             metrics::counter!("mux.client.resync").increment(1);
             metrics::histogram!("mux.client.resync").record(started.elapsed());
         }
         Ok(())
+    }
+
+    /// Ask the server for its pane list and make the local mux match it.
+    async fn sync_with_server(inner: Arc<ClientInner>) -> anyhow::Result<()> {
+        // Learned before the list is asked for, so that nothing waits
+        // between the list arriving and being applied
+        inner.learn_tab_order_support().await;
+        let known = inner.known_remote_ids();
+        let panes = inner.client.list_panes().await?;
+        // A detach while the list was asked for removed the local windows
+        // this client still maps, so the list is applied only while the
+        // domain holds this same client.
+        let attached = Self::get_client_inner_for_domain(inner.local_domain_id)
+            .map_or(false, |current| Arc::ptr_eq(&current, &inner));
+        if !attached {
+            return Ok(());
+        }
+        Self::process_pane_list(inner, panes, None, known)
     }
 
     pub fn process_remote_window_title_change(&self, remote_window_id: WindowId, title: String) {
@@ -595,6 +873,7 @@ impl ClientDomain {
         inner: Arc<ClientInner>,
         panes: ListPanesResponse,
         mut primary_window_id: Option<WindowId>,
+        known: KnownRemoteIds,
     ) -> anyhow::Result<()> {
         let _applying = ApplyingPaneList::begin();
         let mux = Mux::get();
@@ -604,29 +883,16 @@ impl ClientDomain {
             panes
         );
 
-        // "Mark" the current set of known remote ids, so that we can "Sweep"
-        // any unreferenced ids at the bottom, garbage collection style
-        let mut remote_windows_to_forget: HashSet<WindowId> = inner
-            .remote_to_local_window
-            .lock()
-            .unwrap()
-            .keys()
-            .copied()
-            .collect();
-        let mut remote_tabs_to_forget: HashSet<WindowId> = inner
-            .remote_to_local_tab
-            .lock()
-            .unwrap()
-            .keys()
-            .copied()
-            .collect();
-        let mut remote_panes_to_forget: HashSet<WindowId> = inner
-            .remote_to_local_pane
-            .lock()
-            .unwrap()
-            .keys()
-            .copied()
-            .collect();
+        // The caller "marked" the remote ids it knew of before it asked for
+        // `panes`; we "Sweep" any of them that `panes` does not reference at
+        // the bottom, garbage collection style
+        let KnownRemoteIds {
+            windows: mut remote_windows_to_forget,
+            tabs: mut remote_tabs_to_forget,
+            panes: mut remote_panes_to_forget,
+            tab_moves_queued,
+        } = known;
+        let mut tab_order: HashMap<WindowId, Vec<TabId>> = HashMap::new();
 
         for (tabroot, tab_title) in panes.tabs.into_iter().zip(panes.tab_titles.iter()) {
             let root_size = match tabroot.root_size() {
@@ -639,6 +905,10 @@ impl ClientDomain {
 
                 remote_windows_to_forget.remove(&remote_window_id);
                 remote_tabs_to_forget.remove(&remote_tab_id);
+                tab_order
+                    .entry(remote_window_id)
+                    .or_default()
+                    .push(remote_tab_id);
 
                 if let Some(tab_id) = inner.remote_to_local_tab_id(remote_tab_id) {
                     match mux.get_tab(tab_id) {
@@ -675,7 +945,12 @@ impl ClientDomain {
                     let reported_size = entry.size;
                     let pane = if let Some(pane_id) = inner.remote_to_local_pane_id(entry.pane_id) {
                         match mux.get_pane(pane_id) {
-                            Some(pane) => pane,
+                            Some(pane) => {
+                                if let Some(client_pane) = pane.downcast_ref::<ClientPane>() {
+                                    client_pane.set_remote_tab_id(entry.tab_id);
+                                }
+                                pane
+                            }
                             None => {
                                 // We likely decided that we hit EOF on the tab and
                                 // removed it from the mux.  Let's add it back, but
@@ -710,15 +985,43 @@ impl ClientDomain {
                         pane
                     };
                     reported_sizes.push((Arc::clone(&pane), reported_size));
+                    // A pane draws nothing until the server pushes a change,
+                    // so one that stays quiet would report no working directory
+                    // for as long as it is quiet; the listing carries it.
+                    if let Some(client_pane) = pane.downcast_ref::<ClientPane>() {
+                        client_pane.seed_working_dir(entry.working_dir.clone().map(Into::into));
+                    }
                     pane
                 });
-                if topology_changed {
-                    // The tab took the server's tree and its sizes, so those
-                    // are now the sizes its panes have; record them without
-                    // sending them back.
-                    for (pane, size) in reported_sizes {
-                        if let Some(pane) = pane.downcast_ref::<ClientPane>() {
-                            pane.adopt_server_size(size);
+                // The sizes this tab's layout gives its panes: the one
+                // pane a zoomed tab shows, and every pane otherwise. A
+                // pane the server holds at another size is answered with
+                // that layout size; a pane behind a zoom keeps the size
+                // the server reported, as the zoom resizes only the pane
+                // it shows.
+                let tab_size = tab.get_size();
+                let layout_sizes: HashMap<PaneId, TerminalSize> = tab
+                    .iter_panes()
+                    .iter()
+                    .map(|pos| {
+                        (
+                            pos.pane.pane_id(),
+                            TerminalSize {
+                                cols: pos.width,
+                                rows: pos.height,
+                                pixel_width: pos.pixel_width,
+                                pixel_height: pos.pixel_height,
+                                dpi: tab_size.dpi,
+                            },
+                        )
+                    })
+                    .collect();
+                for (pane, reported) in reported_sizes {
+                    if let Some(pane) = pane.downcast_ref::<ClientPane>() {
+                        match layout_sizes.get(&pane.pane_id()) {
+                            Some(size) => pane.reconcile_server_size(reported, *size),
+                            None if topology_changed => pane.adopt_server_size(reported),
+                            None => {}
                         }
                     }
                 }
@@ -774,6 +1077,34 @@ impl ClientDomain {
             }
         }
 
+        // A server that takes tab orders owns them, so show its order, unless
+        // a move made here is not yet queued or was queued after this list
+        // was asked for, which then predates it. A server that does not, or
+        // one not asked yet, keeps its own order, so a move made here stays
+        // as it is. Applied without WindowTabOrderChanged, which would send
+        // the order back. A skipped order is recorded, and `send_tab_orders`
+        // reads it again.
+        let moves = inner.tab_moves();
+        if inner.tab_order_support() == TabOrderSupport::Yes {
+            if moves.made == moves.queued && moves.queued == tab_moves_queued {
+                for (remote_window_id, order) in tab_order {
+                    if let Some(local_window_id) = inner.remote_to_local_window(remote_window_id) {
+                        let local: Vec<TabId> = order
+                            .iter()
+                            .filter_map(|remote_tab_id| {
+                                inner.remote_to_local_tab_id(*remote_tab_id)
+                            })
+                            .collect();
+                        if let Some(mut window) = mux.get_window_mut(local_window_id) {
+                            window.set_tab_order(&local);
+                        }
+                    }
+                }
+            } else {
+                *inner.tab_order_skipped.lock().unwrap() = true;
+            }
+        }
+
         for (remote_window_id, window_title) in panes.window_titles {
             if let Some(local_window_id) = inner.remote_to_local_window(remote_window_id) {
                 let mut window = mux
@@ -784,7 +1115,7 @@ impl ClientDomain {
         }
 
         // "Sweep" away our mapping for ids that are no longer present in the
-        // latest sync
+        // latest sync, and the local copy of each tab that is gone
         log::debug!(
             "after sync, remote_windows_to_forget={remote_windows_to_forget:?}, \
                     remote_tabs_to_forget={remote_tabs_to_forget:?}, \
@@ -796,11 +1127,15 @@ impl ClientDomain {
                 windows.remove(&w);
             }
         }
-        if !remote_tabs_to_forget.is_empty() {
+        let removed_tabs: Vec<TabId> = {
             let mut tabs = inner.remote_to_local_tab.lock().unwrap();
-            for t in remote_tabs_to_forget {
-                tabs.remove(&t);
-            }
+            remote_tabs_to_forget
+                .iter()
+                .filter_map(|t| tabs.remove(t))
+                .collect()
+        };
+        for local_tab_id in removed_tabs {
+            Self::remove_stale_tab(&inner, local_tab_id);
         }
         if !remote_panes_to_forget.is_empty() {
             let mut panes = inner.remote_to_local_pane.lock().unwrap();
@@ -810,6 +1145,32 @@ impl ClientDomain {
         }
 
         Ok(())
+    }
+
+    /// The server no longer has the tab that `local_tab_id` mirrors: remove
+    /// it from the local mux without asking the server to kill any of its
+    /// panes. A pane the server moved into another tab is shown there now,
+    /// and stays; a pane that no tab holds is gone on the server as well, and
+    /// is removed here. A local window left with no tabs is then pruned,
+    /// which is how the copy of a window the server removed goes away.
+    fn remove_stale_tab(inner: &ClientInner, local_tab_id: TabId) {
+        let mux = Mux::get();
+        let tab = match mux.remove_tab_keep_panes(local_tab_id) {
+            Some(tab) => tab,
+            None => return,
+        };
+        log::debug!(
+            "domain {}: removed local tab {local_tab_id}, which the server no longer has",
+            inner.local_domain_id
+        );
+        for pos in tab.iter_panes_ignoring_zoom() {
+            if let Some(pane) = pos.pane.downcast_ref::<ClientPane>() {
+                if mux.resolve_pane_id(pane.pane_id()).is_none() {
+                    pane.ignore_next_kill();
+                    mux.remove_pane(pane.pane_id());
+                }
+            }
+        }
     }
 
     fn finish_attach(
@@ -836,7 +1197,8 @@ impl ClientDomain {
         ));
         *domain.inner.lock().unwrap() = Some(Arc::clone(&inner));
 
-        Self::process_pane_list(inner, panes, primary_window_id)?;
+        // `inner` is new, so there is nothing yet that `panes` could leave out
+        Self::process_pane_list(inner, panes, primary_window_id, KnownRemoteIds::default())?;
 
         Ok(())
     }
@@ -1046,6 +1408,11 @@ impl Domain for ClientDomain {
                 Some(p) => p.index,
                 None => anyhow::bail!("invalid pane id {pane_id}"),
             };
+            // split_and_insert resizes the wrapper, and that request names
+            // its tab, so the tab id is set first.
+            if let Some(client_pane) = moved.downcast_ref::<ClientPane>() {
+                client_pane.set_remote_tab_id(result.tab_id);
+            }
             tab.split_and_insert(pane_index, split_request, Arc::clone(&moved))?;
             return Ok(moved);
         }
@@ -1160,7 +1527,333 @@ impl Domain for ClientDomain {
 
 #[cfg(test)]
 mod test {
-    use super::ResyncState;
+    use super::*;
+    use crate::client::SentRequests;
+    use codec::{ErrorResponse, Pdu, SetWindowTabOrder, UnitResponse};
+    use mux::renderable::StableCursorPosition;
+    use mux::tab::{PaneEntry, PaneNode, SplitDirection, SplitDirectionAndSize};
+    use promise::spawn::SimpleExecutor;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::MutexGuard;
+
+    /// The mux and the executor are process globals, so these tests take
+    /// turns.
+    static SERIAL: Mutex<()> = Mutex::new(());
+
+    const WINDOW: WindowId = 100;
+    const OTHER_WINDOW: WindowId = 101;
+
+    /// `_serial` is last so that the next test starts only once this one's
+    /// leftover tasks are dropped.
+    struct Fixture {
+        mux: Arc<Mux>,
+        inner: Arc<ClientInner>,
+        sent: SentRequests,
+        executor: SimpleExecutor,
+        _serial: MutexGuard<'static, ()>,
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            Mux::shutdown();
+            // The tasks still queued, and those that dropping the mux and the
+            // client wakes, belong to this thread and must be dropped here,
+            // not by the next test when it installs its own scheduler.
+            promise::spawn::set_schedulers(Box::new(drop), Box::new(drop));
+        }
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+            config::use_test_configuration();
+            let mux = Arc::new(Mux::new(None));
+            Mux::set_mux(&mux);
+            let executor = SimpleExecutor::new();
+            let (client, sent) = Client::dummy();
+            let inner = Arc::new(ClientInner::new(alloc_domain_id(), client, None, false));
+            Self {
+                mux,
+                inner,
+                sent,
+                executor,
+                _serial: serial,
+            }
+        }
+
+        /// A fixture whose client is the one a registered `ClientDomain`
+        /// holds, as after an attach.
+        fn with_domain() -> (Self, Arc<ClientDomain>) {
+            let mut f = Self::new();
+            let domain = Arc::new(ClientDomain::new(ClientDomainConfig::Unix(
+                UnixDomain::default(),
+            )));
+            let (client, sent) = Client::dummy();
+            f.inner = Arc::new(ClientInner::new(
+                domain.local_domain_id,
+                client,
+                None,
+                false,
+            ));
+            f.sent = sent;
+            domain.inner.lock().unwrap().replace(Arc::clone(&f.inner));
+            let registered: Arc<dyn Domain> = domain.clone();
+            f.mux.add_domain(&registered);
+            (f, domain)
+        }
+
+        /// Apply a pane list as `sync_with_server` does.
+        fn resync(&self, panes: ListPanesResponse) {
+            self.resync_knowing(panes, self.inner.known_remote_ids());
+        }
+
+        fn resync_knowing(&self, panes: ListPanesResponse, known: KnownRemoteIds) {
+            ClientDomain::process_pane_list(Arc::clone(&self.inner), panes, None, known).unwrap();
+        }
+
+        fn local_pane(&self, remote_pane_id: PaneId) -> PaneId {
+            self.inner.remote_to_local_pane_id(remote_pane_id).unwrap()
+        }
+
+        fn local_tab(&self, remote_tab_id: TabId) -> TabId {
+            self.inner.remote_to_local_tab_id(remote_tab_id).unwrap()
+        }
+
+        fn local_window(&self) -> WindowId {
+            self.inner.remote_to_local_window(WINDOW).unwrap()
+        }
+
+        /// The local tabs of the local window, each as its local pane ids.
+        fn window_tabs(&self) -> Vec<Vec<PaneId>> {
+            let window = self.mux.get_window(self.local_window()).unwrap();
+            window
+                .iter_tabs()
+                .map(|tab| {
+                    tab.iter_panes_ignoring_zoom()
+                        .iter()
+                        .map(|pos| pos.pane.pane_id())
+                        .collect()
+                })
+                .collect()
+        }
+
+        /// The local tabs of the local window, in order.
+        fn window_tab_ids(&self) -> Vec<TabId> {
+            let window = self.mux.get_window(self.local_window()).unwrap();
+            window.iter_tabs().map(|tab| tab.tab_id()).collect()
+        }
+
+        /// Reorder the local window's tabs, which moving a tab in the GUI
+        /// also does.
+        fn move_tabs_locally(&self, order: &[TabId]) {
+            let window_id = self.local_window();
+            assert!(self
+                .mux
+                .get_window_mut(window_id)
+                .unwrap()
+                .set_tab_order(order));
+        }
+
+        /// Run the queued tasks. Each round runs the tasks queued before it;
+        /// three rounds also run the tasks those queue, two levels down, as
+        /// a kill deferred to the main thread is.
+        fn run_queued(&self) {
+            for _ in 0..3 {
+                let done = Arc::new(AtomicBool::new(false));
+                let flag = Arc::clone(&done);
+                promise::spawn::spawn_into_main_thread(async move {
+                    flag.store(true, Ordering::SeqCst);
+                })
+                .detach();
+                while !done.load(Ordering::SeqCst) {
+                    self.executor.tick().unwrap();
+                }
+            }
+        }
+
+        /// Run `task` with the server answering each tab order it sends, or
+        /// refusing it with `refusal` as a server does, in an error response,
+        /// and return the tab orders sent.
+        fn tab_orders_answered(
+            &self,
+            refusal: Option<&str>,
+            task: impl std::future::Future<Output = ()> + 'static,
+        ) -> Vec<SetWindowTabOrder> {
+            self.run_queued();
+            self.sent.take();
+            promise::spawn::spawn(task).detach();
+            self.run_queued();
+            let sent = self.sent.answer(|pdu| match (pdu, refusal) {
+                (Pdu::SetWindowTabOrder(_), Some(refusal)) => {
+                    Ok(Pdu::ErrorResponse(ErrorResponse {
+                        reason: refusal.to_string(),
+                    }))
+                }
+                _ => Ok(Pdu::UnitResponse(UnitResponse {})),
+            });
+            self.run_queued();
+            sent.into_iter()
+                .filter_map(|pdu| match pdu {
+                    Pdu::SetWindowTabOrder(request) => Some(request),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// Send the local window's order, as a move does, with the server
+        /// answering it.
+        fn send_tab_orders(&self) -> Vec<SetWindowTabOrder> {
+            let inner = Arc::clone(&self.inner);
+            let local = self.local_window();
+            self.tab_orders_answered(None, async move {
+                inner.send_tab_orders(local, vec![WINDOW]).await
+            })
+        }
+
+        /// The remote panes the client asked the server to kill.
+        fn kills_sent(&self) -> Vec<PaneId> {
+            self.run_queued();
+            self.sent
+                .take()
+                .into_iter()
+                .filter_map(|pdu| match pdu {
+                    Pdu::KillPane(kill) => Some(kill.pane_id),
+                    _ => None,
+                })
+                .collect()
+        }
+    }
+
+    fn leaf(window_id: WindowId, tab_id: TabId, pane_id: PaneId, size: TerminalSize) -> PaneNode {
+        PaneNode::Leaf(PaneEntry {
+            window_id,
+            tab_id,
+            pane_id,
+            title: format!("pane {pane_id}"),
+            size,
+            working_dir: None,
+            is_active_pane: true,
+            is_zoomed_pane: false,
+            workspace: "default".to_string(),
+            cursor_pos: StableCursorPosition::default(),
+            physical_top: 0,
+            top_row: 0,
+            left_col: 0,
+            tty_name: None,
+        })
+    }
+
+    fn size(cols: usize) -> TerminalSize {
+        TerminalSize {
+            rows: 24,
+            cols,
+            ..TerminalSize::default()
+        }
+    }
+
+    /// A pane list of one window holding `tabs`, each a remote tab id and the
+    /// remote panes in it, side by side.
+    fn pane_list(tabs: &[(TabId, &[PaneId])]) -> ListPanesResponse {
+        let tabs: Vec<_> = tabs.iter().map(|(t, p)| (WINDOW, *t, *p)).collect();
+        pane_list_of(&tabs)
+    }
+
+    /// A pane list of the tabs given, each in the remote window named first.
+    fn pane_list_of(tabs: &[(WindowId, TabId, &[PaneId])]) -> ListPanesResponse {
+        let mut list = ListPanesResponse {
+            tabs: vec![],
+            tab_titles: vec![],
+            window_titles: HashMap::new(),
+        };
+        for &(w, t, pane_ids) in tabs {
+            let node = match pane_ids {
+                [one] => leaf(w, t, *one, size(80)),
+                [first, second] => PaneNode::Split {
+                    left: Box::new(leaf(w, t, *first, size(40))),
+                    right: Box::new(leaf(w, t, *second, size(39))),
+                    node: SplitDirectionAndSize {
+                        direction: SplitDirection::Horizontal,
+                        first: size(40),
+                        second: size(39),
+                        ratio: None,
+                    },
+                },
+                _ => unimplemented!("one or two panes per tab"),
+            };
+            list.tabs.push(node);
+            list.tab_titles.push(format!("tab {t}"));
+        }
+        list
+    }
+
+    /// `wezterm cli split-pane --move-pane-id` moves the only pane of one
+    /// tab into another, and the server removes the emptied tab. The resync
+    /// that follows must drop the local copy of that tab, which otherwise
+    /// keeps showing the moved pane, and must not ask the server to kill the
+    /// pane, which lives on in the other tab.
+    #[test]
+    fn a_tab_emptied_by_a_move_is_dropped_and_its_pane_kept() {
+        let f = Fixture::new();
+        f.resync(pane_list(&[(1, &[10]), (2, &[20])]));
+        let (p10, p20) = (f.local_pane(10), f.local_pane(20));
+        let t2 = f.local_tab(2);
+        assert_eq!(f.window_tabs(), vec![vec![p10], vec![p20]]);
+
+        f.resync(pane_list(&[(1, &[10, 20])]));
+
+        assert_eq!(f.window_tabs(), vec![vec![p10, p20]]);
+        assert!(f.mux.get_tab(t2).is_none());
+        assert!(f.mux.get_pane(p20).is_some());
+        assert_eq!(f.kills_sent(), Vec::<PaneId>::new());
+    }
+
+    /// A pane the server moved keeps its wrapper, which then names the tab
+    /// the server lists it in.
+    #[test]
+    fn a_moved_pane_names_its_new_tab() {
+        let f = Fixture::new();
+        f.resync(pane_list(&[(1, &[10]), (2, &[20])]));
+        f.resync(pane_list(&[(1, &[10, 20])]));
+        let pane = f.mux.get_pane(f.local_pane(20)).unwrap();
+        let pane = pane.downcast_ref::<ClientPane>().unwrap();
+        assert_eq!(pane.remote_tab_id(), 1);
+    }
+
+    /// A tab whose panes the server no longer lists at all is dropped with
+    /// them, and no kill is sent for panes that are already gone there.
+    #[test]
+    fn a_tab_the_server_closed_is_dropped_with_its_panes() {
+        let f = Fixture::new();
+        f.resync(pane_list(&[(1, &[10]), (2, &[20, 21])]));
+        let p10 = f.local_pane(10);
+        let (p20, p21) = (f.local_pane(20), f.local_pane(21));
+
+        f.resync(pane_list(&[(1, &[10])]));
+
+        assert_eq!(f.window_tabs(), vec![vec![p10]]);
+        assert!(f.mux.get_pane(p20).is_none());
+        assert!(f.mux.get_pane(p21).is_none());
+        assert_eq!(f.kills_sent(), Vec::<PaneId>::new());
+    }
+
+    /// A list requested before the client learned of a tab (a spawn whose
+    /// reply arrived before the list) does not show that tab, and must not
+    /// remove it.
+    #[test]
+    fn a_tab_learned_after_the_request_is_kept() {
+        let f = Fixture::new();
+        f.resync(pane_list(&[(1, &[10])]));
+        let known_before_request = f.inner.known_remote_ids();
+        f.resync(pane_list(&[(1, &[10]), (2, &[20])]));
+        let (p10, p20) = (f.local_pane(10), f.local_pane(20));
+        let t2 = f.local_tab(2);
+
+        f.resync_knowing(pane_list(&[(1, &[10])]), known_before_request);
+
+        assert_eq!(f.window_tabs(), vec![vec![p10], vec![p20]]);
+        assert_eq!(f.inner.remote_to_local_tab_id(2), Some(t2));
+        assert_eq!(f.kills_sent(), Vec::<PaneId>::new());
+    }
 
     #[test]
     fn requests_during_a_resync_fold_into_one_more() {
@@ -1182,5 +1875,385 @@ mod test {
         assert!(state.request());
         assert!(!state.finish());
         assert!(state.request(), "a later request runs again");
+    }
+
+    /// A tab moved here is sent to the server as the window's new order, in
+    /// the server's ids, to each remote window mapped to the local window:
+    /// two spawns into one window that has no remote window yet each get a
+    /// remote window of their own.
+    #[test]
+    fn a_local_move_makes_a_tab_order_request_for_each_remote_window() {
+        let f = Fixture::new();
+        f.resync(pane_list(&[(1, &[10]), (2, &[20])]));
+        let local = f.local_window();
+        f.inner
+            .record_remote_to_local_window_mapping(OTHER_WINDOW, local);
+        f.resync(pane_list_of(&[
+            (WINDOW, 1, &[10]),
+            (WINDOW, 2, &[20]),
+            (OTHER_WINDOW, 3, &[30]),
+        ]));
+        let (t1, t2, t3) = (f.local_tab(1), f.local_tab(2), f.local_tab(3));
+        f.move_tabs_locally(&[t3, t1, t2]);
+
+        let remote_windows = f.inner.remote_windows_of(local);
+        let mut requests = f.inner.tab_order_requests(local, &remote_windows);
+        requests.sort_by_key(|request| request.window_id);
+        assert_eq!(
+            requests,
+            vec![
+                SetWindowTabOrder {
+                    window_id: WINDOW,
+                    tab_ids: vec![3, 1, 2],
+                },
+                SetWindowTabOrder {
+                    window_id: OTHER_WINDOW,
+                    tab_ids: vec![3, 1, 2],
+                },
+            ]
+        );
+    }
+
+    /// The client asks once whether the server takes tab orders, with an
+    /// empty order: a server that calls the PDU invalid predates them, and
+    /// one that gives any other answer, an error included, takes them.
+    #[test]
+    fn the_server_is_asked_whether_it_takes_tab_orders() {
+        let cases: [(&str, Option<&str>, TabOrderSupport); 3] = [
+            ("answered", None, TabOrderSupport::Yes),
+            (
+                "older server",
+                Some("Error: invalid PDU Invalid { ident: 63 }"),
+                TabOrderSupport::No,
+            ),
+            (
+                "window gone",
+                Some("Error: window 100 is invalid"),
+                TabOrderSupport::Yes,
+            ),
+        ];
+        for (case, refusal, support) in cases {
+            let f = Fixture::new();
+            f.resync(pane_list(&[(1, &[10])]));
+            let inner = Arc::clone(&f.inner);
+            let asked =
+                f.tab_orders_answered(
+                    refusal,
+                    async move { inner.learn_tab_order_support().await },
+                );
+            assert_eq!(
+                asked,
+                vec![SetWindowTabOrder {
+                    window_id: WINDOW,
+                    tab_ids: vec![],
+                }],
+                "{case}"
+            );
+            assert_eq!(f.inner.tab_order_support(), support, "{case}");
+        }
+
+        let f = Fixture::new();
+        f.resync(pane_list(&[(1, &[10])]));
+        f.inner.set_tab_order_support(TabOrderSupport::Yes);
+        let inner = Arc::clone(&f.inner);
+        let asked =
+            f.tab_orders_answered(None, async move { inner.learn_tab_order_support().await });
+        assert_eq!(asked, vec![]);
+    }
+
+    /// A question that gets no answer settles nothing; the next sync asks
+    /// again.
+    #[test]
+    fn a_question_with_no_answer_is_asked_again() {
+        let f = Fixture::new();
+        f.resync(pane_list(&[(1, &[10])]));
+        f.run_queued();
+        f.sent.take();
+        let inner = Arc::clone(&f.inner);
+        promise::spawn::spawn(async move { inner.learn_tab_order_support().await }).detach();
+        f.run_queued();
+        let asked = f
+            .sent
+            .answer(|_| Err(anyhow!("no answer: the connection is gone")));
+        f.run_queued();
+        assert!(matches!(asked[..], [Pdu::SetWindowTabOrder(_)]));
+        assert_eq!(f.inner.tab_order_support(), TabOrderSupport::Unknown);
+    }
+
+    /// A move that the server refuses as an invalid PDU shows that it
+    /// predates tab orders, so the next move is not sent.
+    #[test]
+    fn a_move_refused_as_an_invalid_pdu_stops_further_moves() {
+        let f = Fixture::new();
+        f.resync(pane_list(&[(1, &[10]), (2, &[20])]));
+        let local = f.local_window();
+        let move_once = || {
+            f.inner.count_tab_move();
+            let inner = Arc::clone(&f.inner);
+            async move { inner.send_tab_orders(local, vec![WINDOW]).await }
+        };
+        let refusal = Some("Error: invalid PDU Invalid { ident: 63 }");
+
+        assert_eq!(f.tab_orders_answered(refusal, move_once()).len(), 1);
+        assert_eq!(f.inner.tab_order_support(), TabOrderSupport::No);
+        assert_eq!(f.tab_orders_answered(refusal, move_once()), vec![]);
+    }
+
+    /// A move that sends nothing, here because its window is gone, leaves
+    /// nothing on the server for a pane list to predate, so the next list's
+    /// order is shown.
+    #[test]
+    fn a_move_that_sends_nothing_does_not_hold_back_a_list() {
+        let f = Fixture::new();
+        f.inner.set_tab_order_support(TabOrderSupport::Yes);
+        f.resync(pane_list(&[(1, &[10]), (2, &[20])]));
+        let (t1, t2) = (f.local_tab(1), f.local_tab(2));
+        let known_before_the_move = f.inner.known_remote_ids();
+        f.inner.count_tab_move();
+        let gone_window = f.local_window() + 1000;
+        let inner = Arc::clone(&f.inner);
+        let sent = f.tab_orders_answered(None, async move {
+            inner.send_tab_orders(gone_window, vec![WINDOW]).await
+        });
+        assert_eq!(sent, vec![]);
+
+        f.resync_knowing(pane_list(&[(2, &[20]), (1, &[10])]), known_before_the_move);
+        assert_eq!(f.window_tab_ids(), vec![t2, t1]);
+    }
+
+    /// A move is counted by the handler of its notification, before the
+    /// send is deferred, so a pane list asked for earlier and applied before
+    /// the send runs keeps the move.
+    #[test]
+    fn a_move_is_counted_before_its_send_is_deferred() {
+        let (f, _domain) = Fixture::with_domain();
+        f.inner.set_tab_order_support(TabOrderSupport::Yes);
+        f.resync(pane_list(&[(1, &[10]), (2, &[20])]));
+        let (t1, t2) = (f.local_tab(1), f.local_tab(2));
+        let known_before_the_move = f.inner.known_remote_ids();
+        f.move_tabs_locally(&[t2, t1]);
+        f.mux
+            .notify(MuxNotification::WindowTabOrderChanged(f.local_window()));
+
+        f.resync_knowing(pane_list(&[(1, &[10]), (2, &[20])]), known_before_the_move);
+        assert_eq!(f.window_tab_ids(), vec![t2, t1]);
+    }
+
+    /// A server that takes tab orders owns them: a tab another client added
+    /// and moved before this client's next pane list is shown in the
+    /// server's place, not after the tabs this client already had.
+    #[test]
+    fn a_tab_added_and_moved_elsewhere_takes_the_servers_place() {
+        let f = Fixture::new();
+        f.inner.set_tab_order_support(TabOrderSupport::Yes);
+        f.resync(pane_list(&[(1, &[10]), (2, &[20])]));
+        let (t1, t2) = (f.local_tab(1), f.local_tab(2));
+
+        f.resync(pane_list(&[(3, &[30]), (1, &[10]), (2, &[20])]));
+
+        assert_eq!(f.window_tab_ids(), vec![f.local_tab(3), t1, t2]);
+    }
+
+    /// A move made here that another client undid before this client's next
+    /// pane list is undone here too: the server's order is shown, whatever
+    /// the list before it said.
+    #[test]
+    fn a_move_undone_on_the_server_is_undone_here() {
+        let f = Fixture::new();
+        f.inner.set_tab_order_support(TabOrderSupport::Yes);
+        f.resync(pane_list(&[(1, &[10]), (2, &[20])]));
+        let (t1, t2) = (f.local_tab(1), f.local_tab(2));
+        f.move_tabs_locally(&[t2, t1]);
+
+        f.resync(pane_list(&[(1, &[10]), (2, &[20])]));
+
+        assert_eq!(f.window_tab_ids(), vec![t1, t2]);
+    }
+
+    /// A pane list asked for before this client sent a move predates the
+    /// move, however late it is applied, so it leaves the tabs where they
+    /// are; a list asked for after the move shows the server's order.
+    #[test]
+    fn a_list_requested_before_a_move_keeps_the_move() {
+        let f = Fixture::new();
+        f.inner.set_tab_order_support(TabOrderSupport::Yes);
+        f.resync(pane_list(&[(1, &[10]), (2, &[20]), (3, &[30])]));
+        let (t1, t2, t3) = (f.local_tab(1), f.local_tab(2), f.local_tab(3));
+        let known_before_the_move = f.inner.known_remote_ids();
+        f.move_tabs_locally(&[t2, t3, t1]);
+        f.inner.count_tab_move();
+
+        f.resync_knowing(
+            pane_list(&[(2, &[20]), (1, &[10]), (3, &[30])]),
+            known_before_the_move,
+        );
+        assert_eq!(f.window_tab_ids(), vec![t2, t3, t1]);
+
+        f.send_tab_orders();
+        f.resync(pane_list(&[(3, &[30]), (1, &[10]), (2, &[20])]));
+        assert_eq!(f.window_tab_ids(), vec![t3, t1, t2]);
+    }
+
+    /// A pane list asked for after a move was made but before its request
+    /// was queued is ahead of that request on the wire, so it predates the
+    /// move and leaves the tabs where they are.
+    #[test]
+    fn a_list_requested_before_a_move_is_queued_keeps_the_move() {
+        let f = Fixture::new();
+        f.inner.set_tab_order_support(TabOrderSupport::Yes);
+        f.resync(pane_list(&[(1, &[10]), (2, &[20])]));
+        let (t1, t2) = (f.local_tab(1), f.local_tab(2));
+        f.move_tabs_locally(&[t2, t1]);
+        f.inner.count_tab_move();
+        let known_before_the_request = f.inner.known_remote_ids();
+        f.send_tab_orders();
+
+        f.resync_knowing(
+            pane_list(&[(1, &[10]), (2, &[20])]),
+            known_before_the_request,
+        );
+
+        assert_eq!(f.window_tab_ids(), vec![t2, t1]);
+    }
+
+    /// A move queues its request to every remote window in one step, so
+    /// that no pane list can be asked for between two of them.
+    #[test]
+    fn a_move_queues_a_request_for_each_remote_window_at_once() {
+        let f = Fixture::new();
+        f.resync(pane_list(&[(1, &[10])]));
+        let local = f.local_window();
+        f.inner
+            .record_remote_to_local_window_mapping(OTHER_WINDOW, local);
+        f.inner.count_tab_move();
+        let inner = Arc::clone(&f.inner);
+
+        let first_batch = f.tab_orders_answered(None, async move {
+            inner
+                .send_tab_orders(local, vec![WINDOW, OTHER_WINDOW])
+                .await
+        });
+
+        assert_eq!(first_batch.len(), 2);
+    }
+
+    /// A move made while the server is known to predate tab orders sends
+    /// nothing and stops counting as made, so the server's order is shown
+    /// again once a later connection learns the server takes it.
+    #[test]
+    fn a_move_not_sent_to_an_older_server_does_not_stop_its_order_later() {
+        let f = Fixture::new();
+        f.resync(pane_list(&[(1, &[10]), (2, &[20])]));
+        let (t1, t2) = (f.local_tab(1), f.local_tab(2));
+        f.inner.set_tab_order_support(TabOrderSupport::No);
+        f.move_tabs_locally(&[t2, t1]);
+        f.inner.count_tab_move();
+        assert_eq!(f.send_tab_orders(), vec![]);
+
+        f.inner.set_tab_order_support(TabOrderSupport::Yes);
+        f.resync(pane_list(&[(1, &[10]), (2, &[20])]));
+
+        assert_eq!(f.window_tab_ids(), vec![t1, t2]);
+    }
+
+    /// A list whose tab order is not shown because a move made here is in
+    /// flight is followed, once that move is answered, by a fresh list,
+    /// whose order is shown: here another client's move, which the skipped
+    /// list carried.
+    #[test]
+    fn a_skipped_order_is_read_again_once_the_move_is_answered() {
+        let (f, _domain) = Fixture::with_domain();
+        f.inner.set_tab_order_support(TabOrderSupport::Yes);
+        f.resync(pane_list(&[(1, &[10]), (2, &[20])]));
+        let (t1, t2) = (f.local_tab(1), f.local_tab(2));
+        let known_before_the_move = f.inner.known_remote_ids();
+        f.inner.count_tab_move();
+        let inner = Arc::clone(&f.inner);
+        let local = f.local_window();
+        promise::spawn::spawn(async move { inner.send_tab_orders(local, vec![WINDOW]).await })
+            .detach();
+        f.run_queued();
+
+        f.resync_knowing(pane_list(&[(2, &[20]), (1, &[10])]), known_before_the_move);
+        assert_eq!(f.window_tab_ids(), vec![t1, t2]);
+
+        f.sent.answer(|_| Ok(Pdu::UnitResponse(UnitResponse {})));
+        f.run_queued();
+        let read_again = f.sent.answer(|pdu| match pdu {
+            Pdu::ListPanes(_) => Ok(Pdu::ListPanesResponse(pane_list(&[(2, &[20]), (1, &[10])]))),
+            _ => Ok(Pdu::UnitResponse(UnitResponse {})),
+        });
+        f.run_queued();
+
+        assert!(read_again
+            .iter()
+            .any(|pdu| matches!(pdu, Pdu::ListPanes(_))));
+        assert_eq!(f.window_tab_ids(), vec![t2, t1]);
+    }
+
+    /// A domain that detaches while a move is in flight reads nothing once
+    /// the move is answered: its local copies are gone, and a list applied
+    /// now would bring them back.
+    #[test]
+    fn a_skipped_order_is_not_read_after_a_detach() {
+        let (f, domain) = Fixture::with_domain();
+        f.inner.set_tab_order_support(TabOrderSupport::Yes);
+        f.resync(pane_list(&[(1, &[10]), (2, &[20])]));
+        let known_before_the_move = f.inner.known_remote_ids();
+        f.inner.count_tab_move();
+        let inner = Arc::clone(&f.inner);
+        let local = f.local_window();
+        promise::spawn::spawn(async move { inner.send_tab_orders(local, vec![WINDOW]).await })
+            .detach();
+        f.run_queued();
+        f.resync_knowing(pane_list(&[(2, &[20]), (1, &[10])]), known_before_the_move);
+
+        domain.perform_detach();
+        f.sent.answer(|_| Ok(Pdu::UnitResponse(UnitResponse {})));
+        f.run_queued();
+
+        let after_the_detach = f.sent.answer(|_| Ok(Pdu::UnitResponse(UnitResponse {})));
+        assert!(!after_the_detach
+            .iter()
+            .any(|pdu| matches!(pdu, Pdu::ListPanes(_))));
+    }
+
+    /// A domain that detaches while a pane list is unanswered applies
+    /// nothing when the list arrives: detach removed the local windows its
+    /// client still maps.
+    #[test]
+    fn a_list_answered_after_a_detach_is_not_applied() {
+        let (f, domain) = Fixture::with_domain();
+        f.inner.set_tab_order_support(TabOrderSupport::Yes);
+        f.resync(pane_list(&[(1, &[10]), (2, &[20])]));
+        let inner = Arc::clone(&f.inner);
+        promise::spawn::spawn(async move { ClientDomain::sync_with_server(inner).await })
+            .detach();
+        f.run_queued();
+
+        domain.perform_detach();
+        f.sent.answer(|pdu| match pdu {
+            Pdu::ListPanes(_) => Ok(Pdu::ListPanesResponse(pane_list(&[(1, &[10]), (2, &[20])]))),
+            _ => Ok(Pdu::UnitResponse(UnitResponse {})),
+        });
+        f.run_queued();
+
+        assert!(f.mux.iter_panes().is_empty());
+    }
+
+    /// A server that does not take tab orders keeps its own order. A resync
+    /// must not undo the move made in this client, also when the server
+    /// added a tab since.
+    #[test]
+    fn a_local_move_survives_a_server_that_does_not_take_orders() {
+        let f = Fixture::new();
+        f.inner.set_tab_order_support(TabOrderSupport::No);
+        f.resync(pane_list(&[(1, &[10]), (2, &[20]), (3, &[30])]));
+        let (t1, t2, t3) = (f.local_tab(1), f.local_tab(2), f.local_tab(3));
+        f.move_tabs_locally(&[t3, t1, t2]);
+
+        f.resync(pane_list(&[(1, &[10]), (2, &[20]), (3, &[30]), (4, &[40])]));
+
+        assert_eq!(f.window_tab_ids(), vec![t3, t1, t2, f.local_tab(4)]);
     }
 }
