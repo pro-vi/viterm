@@ -1408,8 +1408,8 @@ impl Domain for ClientDomain {
                 Some(p) => p.index,
                 None => anyhow::bail!("invalid pane id {pane_id}"),
             };
-            // The wrapper's requests name the tab the server moved it into,
-            // and split_and_insert already resizes it.
+            // split_and_insert resizes the wrapper, and that request names
+            // its tab, so the tab id is set first.
             if let Some(client_pane) = moved.downcast_ref::<ClientPane>() {
                 client_pane.set_remote_tab_id(result.tab_id);
             }
