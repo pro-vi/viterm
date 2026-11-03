@@ -164,7 +164,9 @@ As features stabilize some brief notes about them will accumulate here.
   had removed, for example after `wezterm cli split-pane --move-pane-id` moved
   the tab's only pane into another tab; the moved pane then appeared in both
   tabs, and closing the stale tab killed it. The client now removes such a
-  tab without killing its panes. #6210
+  tab without killing its panes. If that tab was the one on screen and the
+  focused pane is in another tab of the window, as after a tab is rebuilt by
+  moving its panes into a new tab, the window now shows that tab. #6210
 * macOS: Fix window border when opacity<1 and shadow enabled.
   Thanks to @Adams-Galaxy! #8038 #5158
 * perf: Terminal images were hashed three times each on the transmit path; the sha256

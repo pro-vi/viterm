@@ -749,10 +749,13 @@ impl ClientDomain {
     /// it from the local mux without asking the server to kill any of its
     /// panes. A pane the server moved into another tab is shown there now,
     /// and stays; a pane that no tab holds is gone on the server as well, and
-    /// is removed here. A local window left with no tabs is then pruned,
-    /// which is how the copy of a window the server removed goes away.
+    /// is removed here. A window that shows the tab first activates the tab
+    /// holding the focused pane, when there is one. A local window left with
+    /// no tabs is then pruned, which is how the copy of a window the server
+    /// removed goes away.
     fn remove_stale_tab(inner: &ClientInner, local_tab_id: TabId) {
         let mux = Mux::get();
+        Self::activate_tab_of_focused_pane(inner, local_tab_id);
         let tab = match mux.remove_tab_keep_panes(local_tab_id) {
             Some(tab) => tab,
             None => return,
@@ -769,6 +772,36 @@ impl ClientDomain {
                 }
             }
         }
+    }
+
+    /// When the tab a window shows is about to be removed and the focused
+    /// pane is in another tab of that window, activate that tab, with the
+    /// pane active in it, rather than the neighbour (or, with
+    /// `switch_to_last_active_tab_when_closing_tab`, the last active tab)
+    /// that the removal would pick. A tab rebuilt on the server, by moving
+    /// its panes into a new tab and focusing one of them, needs this: the
+    /// server's `PaneFocused` can be applied before the resync that moves
+    /// the pane, so it selects the old tab, where the pane still is, and it
+    /// is not sent again.
+    fn activate_tab_of_focused_pane(inner: &ClientInner, local_tab_id: TabId) -> Option<()> {
+        let mux = Mux::get();
+        let window_id = mux.window_containing_tab(local_tab_id)?;
+        if mux.get_window(window_id)?.get_active_tab()?.tab_id() != local_tab_id {
+            return None;
+        }
+        let remote_pane_id = (*inner.focused_remote_pane_id.lock().unwrap())?;
+        let pane = mux.get_pane(inner.remote_to_local_pane_id(remote_pane_id)?)?;
+        let tab = {
+            let mut window = mux.get_window_mut(window_id)?;
+            let (idx, tab) = window.iter_tabs().cloned().enumerate().find(|(_, tab)| {
+                tab.tab_id() != local_tab_id && tab.contains_pane(pane.pane_id())
+            })?;
+            // The tab left behind is about to be removed
+            window.set_active_tab_idx_without_saving(idx);
+            tab
+        };
+        tab.set_active_pane(&pane);
+        Some(())
     }
 
     fn finish_attach(
@@ -1308,5 +1341,37 @@ mod test {
         assert_eq!(f.window_tabs(), vec![vec![p10], vec![p20]]);
         assert_eq!(f.inner.remote_to_local_tab_id(2), Some(t2));
         assert_eq!(f.kills_sent(), Vec::<PaneId>::new());
+    }
+
+    /// The shown tab 2 is rebuilt as tab 4 in two resyncs: the first moves
+    /// the focused pane 20 out, the second moves 21 and drops tab 2. The
+    /// window must then show tab 4 with pane 20 active, not tab 3 beside
+    /// tab 2, and the tab shown before tab 2 stays the last active tab.
+    /// Setting `focused_remote_pane_id` stands in for the `PaneFocused` that
+    /// was applied before the first resync, while pane 20 was still in tab 2.
+    #[test]
+    fn a_shown_tab_the_server_removed_gives_way_to_the_focused_panes_tab() {
+        let f = Fixture::new();
+        f.resync(pane_list(&[(1, &[10]), (2, &[20, 21]), (3, &[30])]));
+        let window_id = f.inner.remote_to_local_window(WINDOW).unwrap();
+        f.mux
+            .get_window_mut(window_id)
+            .unwrap()
+            .remember_and_set_active_tab_idx(1);
+        *f.inner.focused_remote_pane_id.lock().unwrap() = Some(20);
+
+        f.resync(pane_list(&[(1, &[10]), (2, &[21]), (3, &[30]), (4, &[20])]));
+        // Every leaf is marked active and the last wins, so tab 4 ends with
+        // 21 active
+        f.resync(pane_list(&[(1, &[10]), (3, &[30]), (4, &[20, 21])]));
+
+        let window = f.mux.get_window(window_id).unwrap();
+        let active = window.get_active_tab().unwrap();
+        assert_eq!(active.tab_id(), f.local_tab(4));
+        assert_eq!(
+            active.get_active_pane().map(|pane| pane.pane_id()),
+            Some(f.local_pane(20))
+        );
+        assert_eq!(window.get_last_active_tab_idx(), Some(0));
     }
 }
