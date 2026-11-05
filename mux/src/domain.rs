@@ -98,6 +98,14 @@ pub trait Domain: Downcast + Send + Sync {
             None => anyhow::bail!("invalid pane index {}", pane_index),
         };
 
+        // Spawning the new pane, or taking the moved pane out of its tab,
+        // cannot be undone if the split below fails: the pane would keep
+        // running in no tab.  So check the split first.  When the moved
+        // pane comes from this same tab, the check sees the layout before
+        // that pane's space is given back, so a split that would fit only
+        // after that is refused.
+        tab.check_split(pane_index, split_request)?;
+
         let pane = match source {
             SplitSource::Spawn {
                 command,
@@ -107,6 +115,9 @@ pub trait Domain: Downcast + Send + Sync {
                     .await?
             }
             SplitSource::MovePane(src_pane_id) => {
+                if src_pane_id == pane_id {
+                    anyhow::bail!("cannot move pane {} into a split of itself", pane_id);
+                }
                 let (_domain, _window, src_tab) = mux
                     .resolve_pane_id(src_pane_id)
                     .ok_or_else(|| anyhow::anyhow!("pane {} not found", src_pane_id))?;
@@ -728,5 +739,343 @@ impl Domain for LocalDomain {
 
     fn state(&self) -> DomainState {
         DomainState::Attached
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::pane::{CachePolicy, ForEachPaneLogicalLine, LogicalLine, WithPaneLines};
+    use crate::renderable::{RenderableDimensions, StableCursorPosition};
+    use crate::tab::{SplitDirection, SplitSize};
+    use parking_lot::MappedMutexGuard;
+    use rangeset::RangeSet;
+    use std::ops::Range;
+    use termwiz::surface::SequenceNo;
+    use url::Url;
+    use wezterm_term::color::ColorPalette;
+    use wezterm_term::{KeyCode, KeyModifiers, Line, MouseEvent, StableRowIndex};
+
+    struct FakePane {
+        id: PaneId,
+    }
+
+    impl FakePane {
+        fn new() -> Arc<dyn Pane> {
+            Arc::new(Self {
+                id: alloc_pane_id(),
+            })
+        }
+    }
+
+    impl Pane for FakePane {
+        fn pane_id(&self) -> PaneId {
+            self.id
+        }
+        fn get_cursor_position(&self) -> StableCursorPosition {
+            unimplemented!()
+        }
+        fn get_current_seqno(&self) -> SequenceNo {
+            unimplemented!()
+        }
+        fn get_changed_since(
+            &self,
+            _: Range<StableRowIndex>,
+            _: SequenceNo,
+        ) -> RangeSet<StableRowIndex> {
+            unimplemented!()
+        }
+        fn with_lines_mut(&self, _: Range<StableRowIndex>, _: &mut dyn WithPaneLines) {
+            unimplemented!()
+        }
+        fn for_each_logical_line_in_stable_range_mut(
+            &self,
+            _: Range<StableRowIndex>,
+            _: &mut dyn ForEachPaneLogicalLine,
+        ) {
+            unimplemented!()
+        }
+        fn get_lines(&self, _: Range<StableRowIndex>) -> (StableRowIndex, Vec<Line>) {
+            unimplemented!()
+        }
+        fn get_logical_lines(&self, _: Range<StableRowIndex>) -> Vec<LogicalLine> {
+            unimplemented!()
+        }
+        fn get_dimensions(&self) -> RenderableDimensions {
+            unimplemented!()
+        }
+        fn get_title(&self) -> String {
+            unimplemented!()
+        }
+        fn send_paste(&self, _: &str) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        fn reader(&self) -> anyhow::Result<Option<Box<dyn std::io::Read + Send>>> {
+            Ok(None)
+        }
+        fn writer(&self) -> MappedMutexGuard<'_, dyn std::io::Write> {
+            unimplemented!()
+        }
+        fn resize(&self, _: TerminalSize) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn key_down(&self, _: KeyCode, _: KeyModifiers) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        fn key_up(&self, _: KeyCode, _: KeyModifiers) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        fn mouse_event(&self, _: MouseEvent) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        fn is_dead(&self) -> bool {
+            false
+        }
+        fn palette(&self) -> ColorPalette {
+            unimplemented!()
+        }
+        fn domain_id(&self) -> DomainId {
+            0
+        }
+        fn is_mouse_grabbed(&self) -> bool {
+            false
+        }
+        fn is_alt_screen_active(&self) -> bool {
+            false
+        }
+        fn get_current_working_dir(&self, _: CachePolicy) -> Option<Url> {
+            None
+        }
+    }
+
+    /// Spawns fake panes and registers them with the mux, as a real
+    /// domain does before the split puts them in a tab
+    struct FakeDomain {
+        id: DomainId,
+    }
+
+    #[async_trait(?Send)]
+    impl Domain for FakeDomain {
+        async fn spawn_pane(
+            &self,
+            _: TerminalSize,
+            _: Option<CommandBuilder>,
+            _: Option<String>,
+        ) -> anyhow::Result<Arc<dyn Pane>> {
+            let pane = FakePane::new();
+            Mux::get().add_pane(&pane)?;
+            Ok(pane)
+        }
+        fn detachable(&self) -> bool {
+            false
+        }
+        fn domain_id(&self) -> DomainId {
+            self.id
+        }
+        fn domain_name(&self) -> &str {
+            "fake"
+        }
+        async fn attach(&self, _: Option<WindowId>) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn detach(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn state(&self) -> DomainState {
+            DomainState::Attached
+        }
+    }
+
+    const TAB_SIZE: TerminalSize = TerminalSize {
+        rows: 24,
+        cols: 80,
+        pixel_width: 800,
+        pixel_height: 480,
+        dpi: 96,
+    };
+
+    fn below(size: SplitSize) -> SplitRequest {
+        SplitRequest {
+            direction: SplitDirection::Vertical,
+            target_is_second: true,
+            top_level: false,
+            size,
+        }
+    }
+
+    /// Makes a tab in `window_id` holding `panes`, each split below the last
+    fn new_tab(window_id: WindowId, panes: &[&Arc<dyn Pane>]) -> Arc<Tab> {
+        let mux = Mux::get();
+        let tab = Arc::new(Tab::new(&TAB_SIZE));
+        tab.assign_pane(panes[0]);
+        mux.add_tab_and_active_pane(&tab).unwrap();
+        for (index, pane) in panes.iter().enumerate().skip(1) {
+            tab.split_and_insert(index - 1, below(SplitSize::default()), Arc::clone(pane))
+                .unwrap();
+            mux.add_pane(pane).unwrap();
+        }
+        mux.add_tab_to_window(&tab, window_id).unwrap();
+        tab
+    }
+
+    fn tab_of(pane: &Arc<dyn Pane>) -> Option<TabId> {
+        Mux::get()
+            .resolve_pane_id(pane.pane_id())
+            .map(|(_domain_id, _window_id, tab_id)| tab_id)
+    }
+
+    /// Every pane the mux holds, with the tab it is in
+    fn layout() -> Vec<(PaneId, Option<TabId>)> {
+        let mut layout: Vec<_> = Mux::get()
+            .iter_panes()
+            .iter()
+            .map(|pane| (pane.pane_id(), tab_of(pane)))
+            .collect();
+        layout.sort();
+        layout
+    }
+
+    fn split(
+        domain: &FakeDomain,
+        tab: &Arc<Tab>,
+        target: &Arc<dyn Pane>,
+        source: SplitSource,
+        request: SplitRequest,
+    ) -> anyhow::Result<Arc<dyn Pane>> {
+        smol::block_on(domain.split_pane(source, tab.tab_id(), target.pane_id(), request))
+    }
+
+    #[test]
+    fn a_split_that_fails_moves_and_adds_no_pane() {
+        let mut config = config::Config::default_config();
+        config.mux_enable_ssh_agent = false;
+        config::use_this_configuration(config);
+
+        let domain = Arc::new(FakeDomain {
+            id: alloc_domain_id(),
+        });
+        let mux = Arc::new(Mux::new(Some(domain.clone())));
+        Mux::set_mux(&mux);
+        // The mux spawns work onto the main thread, which panics when no
+        // scheduler is set.  This executor only queues that work; the
+        // test never runs it.
+        let _executor = promise::spawn::SimpleExecutor::new();
+        let window_id = *mux.new_empty_window(None, None);
+
+        // Taller than every tab, so it never fits.
+        let too_tall = below(SplitSize::Cells(TAB_SIZE.rows + 6));
+        let half = below(SplitSize::default());
+        let spawn = || SplitSource::Spawn {
+            command: None,
+            command_dir: None,
+        };
+        let move_pane = |pane: &Arc<dyn Pane>| SplitSource::MovePane(pane.pane_id());
+
+        let target = FakePane::new();
+        let target_tab = new_tab(window_id, &[&target]);
+
+        let (kept, moved) = (FakePane::new(), FakePane::new());
+        let shared_tab = new_tab(window_id, &[&kept, &moved]);
+
+        let only = FakePane::new();
+        new_tab(window_id, &[&only]);
+
+        let alone = FakePane::new();
+        let alone_tab = new_tab(window_id, &[&alone]);
+
+        let (upper, lower) = (FakePane::new(), FakePane::new());
+        let pair_tab = new_tab(window_id, &[&upper, &lower]);
+
+        let (zoomed, beside) = (FakePane::new(), FakePane::new());
+        let zoomed_tab = new_tab(window_id, &[&zoomed, &beside]);
+        zoomed_tab.set_active_pane(&zoomed);
+        zoomed_tab.set_zoomed(true);
+        let unzoomed = FakePane::new();
+        new_tab(window_id, &[&unzoomed]);
+
+        let failures = [
+            (
+                "no room, moving from a tab with other panes",
+                &target_tab,
+                &target,
+                move_pane(&moved),
+                too_tall,
+            ),
+            (
+                "no room, moving from a tab the pane is alone in",
+                &target_tab,
+                &target,
+                move_pane(&only),
+                too_tall,
+            ),
+            (
+                "moving a pane into a split of itself",
+                &alone_tab,
+                &alone,
+                move_pane(&alone),
+                half,
+            ),
+            (
+                "no room, moving within its own tab",
+                &pair_tab,
+                &upper,
+                move_pane(&lower),
+                too_tall,
+            ),
+            (
+                "top level, moving into a zoomed tab",
+                &zoomed_tab,
+                &zoomed,
+                move_pane(&unzoomed),
+                SplitRequest {
+                    top_level: true,
+                    ..half
+                },
+            ),
+            ("no room, spawning", &target_tab, &target, spawn(), too_tall),
+        ];
+
+        let mut changed = vec![];
+        for (case, tab, target, source, request) in failures.iter().cloned() {
+            let before = layout();
+            let result = split(&domain, tab, target, source, request);
+            assert!(result.is_err(), "{}: the split should fail", case);
+            if layout() != before {
+                changed.push(case);
+            }
+        }
+        assert!(
+            changed.is_empty(),
+            "a failed split moved or added a pane: {:?}",
+            changed
+        );
+
+        // Splits that fit still happen: moves between tabs and within
+        // one, and a spawn.
+        split(&domain, &target_tab, &target, move_pane(&moved), half).unwrap();
+        assert_eq!(tab_of(&moved), Some(target_tab.tab_id()));
+        assert_eq!(shared_tab.count_panes(), Some(1));
+        split(&domain, &target_tab, &moved, move_pane(&target), half).unwrap();
+        assert_eq!(tab_of(&target), Some(target_tab.tab_id()));
+        assert_eq!(target_tab.count_panes(), Some(2));
+        let spawned = split(&domain, &target_tab, &target, spawn(), half).unwrap();
+        assert_eq!(tab_of(&spawned), Some(target_tab.tab_id()));
+        assert_eq!(target_tab.count_panes(), Some(3));
+
+        // A zoomed pane can still be split: for a split that is not top
+        // level, `compute_split_size` un-zooms the tab before the check.
+        let right = SplitRequest {
+            direction: SplitDirection::Horizontal,
+            ..half
+        };
+        for source in vec![spawn(), move_pane(&kept)] {
+            target_tab.set_active_pane(&target);
+            target_tab.set_zoomed(true);
+            split(&domain, &target_tab, &target, source, right).unwrap();
+        }
+        assert_eq!(tab_of(&kept), Some(target_tab.tab_id()));
+        assert_eq!(target_tab.count_panes(), Some(5));
+
+        Mux::shutdown();
     }
 }
