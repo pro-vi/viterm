@@ -832,6 +832,17 @@ impl Tab {
             .swap_active_with_index(pane_index, keep_focus)
     }
 
+    /// Runs the checks that `split_and_insert` makes before it changes
+    /// the tab (zoom, and room for the split) and returns the error it
+    /// would stop with.  It changes nothing.  `split_and_insert` can
+    /// still fail after these checks pass.
+    pub fn check_split(&self, pane_index: usize, request: SplitRequest) -> anyhow::Result<()> {
+        self.inner
+            .lock()
+            .check_split(pane_index, request)
+            .map(|_| ())
+    }
+
     /// Computes the size of the pane that would result if the specified
     /// pane was split in a particular direction.
     /// The intent is to call this prior to spawning the new pane so that
@@ -855,9 +866,13 @@ impl Tab {
         request: SplitRequest,
         pane: Arc<dyn Pane>,
     ) -> anyhow::Result<usize> {
-        self.inner
+        let index = self
+            .inner
             .lock()
-            .split_and_insert(pane_index, request, pane)
+            .split_and_insert(pane_index, request, pane)?;
+        // Let the other clients of a mux server learn of the new layout
+        Mux::try_get().map(|mux| mux.notify(MuxNotification::TabResized(self.tab_id)));
+        Ok(index)
     }
 
     pub fn get_zoomed_pane(&self) -> Option<Arc<dyn Pane>> {
@@ -883,12 +898,13 @@ impl TabInner {
     /// decides which panes the tab holds, how they are split, which one is
     /// active and which one is zoomed; the sizes are this client's. A tree
     /// with this tab's topology leaves the local split sizes and tab size in
-    /// place, and a tree with another topology replaces the tab's tree, sizes
-    /// included. No pane is resized here: a resize would send the server's
-    /// own sizes back to it, and a size it reported may already lag behind a
-    /// resize this client has sent. When only the zoomed pane changed, the
-    /// local tab size is applied again under the new zoom state, which sends
-    /// only sizes this client chose. Returns true when the topology changed.
+    /// place, and a tree with another topology replaces the tab's tree but
+    /// is fitted to the tab size it already has. No pane is resized here: a
+    /// resize would send the server's own sizes back to it, and a size it
+    /// reported may already lag behind a resize this client has sent. When
+    /// only the zoomed pane changed, the local tab size is applied again
+    /// under the new zoom state, which sends only sizes this client chose.
+    /// Returns true when the topology changed.
     fn sync_with_pane_tree<F>(
         &mut self,
         size: TerminalSize,
@@ -940,10 +956,19 @@ impl TabInner {
             }
         }
         let t = cursor.tree();
+        let had_panes = self.pane.as_ref().map_or(false, |tree| !tree.is_empty());
         self.zoomed = zoomed;
         if topology_changed {
             self.pane.replace(t);
-            self.size = size;
+            if had_panes {
+                // The tab keeps its size: fit the reported tree to it
+                // without resizing a pane.
+                let local_size = self.size;
+                self.size = size;
+                self.fit_to_size(local_size);
+            } else {
+                self.size = size;
+            }
         } else if zoom_changed {
             let size = self.size;
             self.apply_size(size);
@@ -1303,38 +1328,43 @@ impl TabInner {
             self.size = size;
             zoomed.resize(size).ok();
         } else {
-            let dims = cell_dimensions(&size);
-            let (min_x, min_y) = compute_min_size(self.pane.as_mut().unwrap());
-            let current_size = self.size;
-
-            // Constrain the new size to the minimum possible dimensions
-            let cols = size.cols.max(min_x);
-            let rows = size.rows.max(min_y);
-            let size = TerminalSize {
-                rows,
-                cols,
-                pixel_width: cols * dims.pixel_width,
-                pixel_height: rows * dims.pixel_height,
-                dpi: dims.dpi,
-            };
-
-            // Update the split nodes with adjusted sizes
-            adjust_x_size(
-                self.pane.as_mut().unwrap(),
-                cols as isize - current_size.cols as isize,
-                &dims,
-            );
-            adjust_y_size(
-                self.pane.as_mut().unwrap(),
-                rows as isize - current_size.rows as isize,
-                &dims,
-            );
-
-            self.size = size;
+            let size = self.fit_to_size(size);
 
             // And then resize the individual panes to match
             apply_sizes_from_splits(self.pane.as_mut().unwrap(), &size);
         }
+    }
+
+    /// Adjusts the split nodes to `size` and takes it as the tab size,
+    /// without resizing a pane.
+    fn fit_to_size(&mut self, size: TerminalSize) -> TerminalSize {
+        let dims = cell_dimensions(&size);
+        let (min_x, min_y) = compute_min_size(self.pane.as_mut().unwrap());
+        let current_size = self.size;
+
+        let cols = size.cols.max(min_x);
+        let rows = size.rows.max(min_y);
+        let size = TerminalSize {
+            rows,
+            cols,
+            pixel_width: cols * dims.pixel_width,
+            pixel_height: rows * dims.pixel_height,
+            dpi: dims.dpi,
+        };
+
+        adjust_x_size(
+            self.pane.as_mut().unwrap(),
+            cols as isize - current_size.cols as isize,
+            &dims,
+        );
+        adjust_y_size(
+            self.pane.as_mut().unwrap(),
+            rows as isize - current_size.rows as isize,
+            &dims,
+        );
+
+        self.size = size;
+        size
     }
 
     /// The tab's size, its zoomed pane and where each pane sits: what a
@@ -2148,43 +2178,51 @@ impl TabInner {
         })
     }
 
+    fn check_split(
+        &mut self,
+        pane_index: usize,
+        request: SplitRequest,
+    ) -> anyhow::Result<SplitDirectionAndSize> {
+        if self.zoomed.is_some() {
+            anyhow::bail!("cannot split while zoomed");
+        }
+
+        let split_info = self
+            .compute_split_size(pane_index, request)
+            .ok_or_else(|| anyhow::anyhow!("invalid pane_index {}; cannot split!", pane_index))?;
+
+        let tab_size = self.size;
+        if split_info.first.rows == 0
+            || split_info.first.cols == 0
+            || split_info.second.rows == 0
+            || split_info.second.cols == 0
+            || split_info.top_of_second() + split_info.second.rows > tab_size.rows
+            || split_info.left_of_second() + split_info.second.cols > tab_size.cols
+        {
+            log::error!(
+                "No space for split!!! {:#?} height={} width={} top_of_second={} left_of_second={} tab_size={:?}",
+                split_info,
+                split_info.height(),
+                split_info.width(),
+                split_info.top_of_second(),
+                split_info.left_of_second(),
+                tab_size
+            );
+            anyhow::bail!("No space for split!");
+        }
+
+        Ok(split_info)
+    }
+
     fn split_and_insert(
         &mut self,
         pane_index: usize,
         request: SplitRequest,
         pane: Arc<dyn Pane>,
     ) -> anyhow::Result<usize> {
-        if self.zoomed.is_some() {
-            anyhow::bail!("cannot split while zoomed");
-        }
+        let split_info = self.check_split(pane_index, request)?;
 
         {
-            let split_info = self
-                .compute_split_size(pane_index, request)
-                .ok_or_else(|| {
-                    anyhow::anyhow!("invalid pane_index {}; cannot split!", pane_index)
-                })?;
-
-            let tab_size = self.size;
-            if split_info.first.rows == 0
-                || split_info.first.cols == 0
-                || split_info.second.rows == 0
-                || split_info.second.cols == 0
-                || split_info.top_of_second() + split_info.second.rows > tab_size.rows
-                || split_info.left_of_second() + split_info.second.cols > tab_size.cols
-            {
-                log::error!(
-                    "No space for split!!! {:#?} height={} width={} top_of_second={} left_of_second={} tab_size={:?}",
-                    split_info,
-                    split_info.height(),
-                    split_info.width(),
-                    split_info.top_of_second(),
-                    split_info.left_of_second(),
-                    tab_size
-                );
-                anyhow::bail!("No space for split!");
-            }
-
             let needs_resize = if request.top_level {
                 self.pane.as_ref().unwrap().num_leaves() > 1
             } else {
@@ -2387,7 +2425,7 @@ impl Into<String> for SerdeUrl {
 }
 
 #[cfg(test)]
-mod test {
+pub(crate) mod test {
     use super::*;
     use crate::renderable::*;
     use parking_lot::{MappedMutexGuard, Mutex};
@@ -2403,7 +2441,7 @@ mod test {
     // therefore run serially; cargo's default parallel runner would otherwise let
     // them clobber each other's global and cross-deliver notifications. Hold this
     // guard for the lifetime of any such test.
-    static MUX_TEST_GUARD: Mutex<()> = Mutex::new(());
+    pub(crate) static MUX_TEST_GUARD: Mutex<()> = Mutex::new(());
 
     struct FakePane {
         id: PaneId,
@@ -2642,6 +2680,53 @@ mod test {
         let ids: Vec<PaneId> = widths(&tab).iter().map(|w| w.0).collect();
         assert_eq!(ids, vec![1, 3]);
         assert_eq!((one.resize_count(), three.resize_count()), (0, 0));
+    }
+
+    #[test]
+    fn resync_with_a_new_topology_keeps_the_local_tab_size() {
+        let (tab, one, _two) = split_tab();
+        let three = FakePane::counting(3, term_size(49, 30));
+        let stale = term_size(49, 30);
+        let tree = reported_split(
+            reported_leaf(1, stale, false),
+            reported_leaf(3, stale, false),
+            stale,
+            stale,
+        );
+        let changed =
+            tab.sync_with_pane_tree(term_size(99, 30), tree, |entry| match entry.pane_id {
+                1 => Arc::clone(&one) as Arc<dyn Pane>,
+                _ => Arc::clone(&three) as Arc<dyn Pane>,
+            });
+        assert!(changed, "pane 3 replaced pane 2");
+        assert_eq!(tab.get_size(), term_size(80, 24));
+        assert_eq!(widths(&tab), vec![(1, 40, 24), (3, 39, 24)]);
+        assert_eq!(
+            (one.resize_count(), three.resize_count()),
+            (0, 0),
+            "fitting the reported tree resizes no pane"
+        );
+    }
+
+    #[test]
+    fn resync_with_a_new_topology_and_zoom_keeps_the_local_tab_size() {
+        let (tab, one, _two) = split_tab();
+        let three = FakePane::counting(3, term_size(49, 30));
+        let stale = term_size(49, 30);
+        let tree = reported_split(
+            reported_leaf(1, stale, false),
+            reported_leaf(3, stale, true),
+            stale,
+            stale,
+        );
+        let changed =
+            tab.sync_with_pane_tree(term_size(99, 30), tree, |entry| match entry.pane_id {
+                1 => Arc::clone(&one) as Arc<dyn Pane>,
+                _ => Arc::clone(&three) as Arc<dyn Pane>,
+            });
+        assert!(changed, "pane 3 replaced pane 2");
+        assert_eq!(tab.get_size(), term_size(80, 24));
+        assert_eq!(widths(&tab), vec![(1, 40, 24), (3, 39, 24)]);
     }
 
     #[test]
@@ -3207,6 +3292,41 @@ mod test {
 
         let received: SplitDirectionAndSize = varbincode::deserialize(with.as_slice()).unwrap();
         assert_eq!(received, split(None));
+    }
+
+    /// A split made on a mux server must reach its other clients, and a
+    /// `TabResized` is what makes a client re-read the tab.
+    #[test]
+    fn tab_split_announces_the_new_layout() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let _guard = MUX_TEST_GUARD.lock();
+        let size = TerminalSize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 800,
+            pixel_height: 600,
+            dpi: 96,
+        };
+        let mux = Arc::new(Mux::new(None));
+        Mux::set_mux(&mux);
+        let tab = Tab::new(&size);
+        tab.assign_pane(&FakePane::new(1, size));
+        let tab_id = tab.tab_id();
+        let announced = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&announced);
+        mux.subscribe(move |notification| {
+            if matches!(notification, MuxNotification::TabResized(id) if id == tab_id) {
+                seen.fetch_add(1, Ordering::SeqCst);
+            }
+            true
+        });
+
+        tab.split_and_insert(0, SplitRequest::default(), FakePane::new(2, size))
+            .unwrap();
+
+        assert_eq!(1, announced.load(Ordering::SeqCst));
+        Mux::shutdown();
     }
 
     fn is_send_and_sync<T: Send + Sync>() -> bool {

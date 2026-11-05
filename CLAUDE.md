@@ -6,10 +6,10 @@ upstream contribution checkout, and the workflow in `CONTRIBUTING.md` — commit
 branch, open a pull request against wezterm/wezterm — describes upstream's
 process, not this one. Read this file first.
 
-If you are reading this, you are on the `build` branch. This file, `PATCHES.md`,
-`BACKLOG.md` and `docs/plans/` exist only there, on purpose: a unit branch must
-contain nothing but its own change. `.inbox/` holds local investigation notes
-and is deliberately untracked.
+If you are reading this, you are on the `build` branch. This file, `PATCHES.md`
+and `BACKLOG.md` exist only there, on purpose: a unit branch must contain
+nothing but its own change. `.inbox/` holds local investigation notes and
+`docs/plans/` local plans; both are deliberately untracked.
 
 ## The four kinds of branch
 
@@ -63,7 +63,7 @@ Two rules that are easy to break by accident:
 - **Do not commit to `build` directly.** A change that exists only on `build`
   can never be sent upstream and will be lost the next time `build` is
   reassembled. Fork-only files (`AGENTS.md`, `CLAUDE.md`, `PATCHES.md`,
-  `BACKLOG.md`, `docs/plans/`, `fork/`) are the sole exception. Engine patches land on `build` only as
+  `BACKLOG.md`, `fork/`) are the sole exception. Engine patches land on `build` only as
   the contents of the `--no-ff` merge commits, conflict resolution included —
   never as a follow-up commit after the merge.
 - **Never install a unit-branch build or use it as evidence of what this machine runs.**
@@ -279,7 +279,11 @@ by hand.
 ## Where the rest of the story is
 
 - `PATCHES.md` — what each unit is and how it was proven.
-- `docs/plans/` — carry and fix plans that exist only on `build`.
+- `docs/plans/` — carry and fix plans. This repo is public and plans name
+  folders on this machine, so they stay here, untracked (`.git/info/exclude`).
+  `build` commits from before 2026-10-28 still track them: checking one out
+  overwrites the local copies with the committed ones, and switching back
+  deletes them, so copy the folder aside first.
 - `.inbox/` — the investigations behind the units, notably the 2026-09-06 note
   tracing the ViTerm freeze to the focus-echo loop and proposing the unit list.
   These are notes, not rules; this file holds the rules. They stay on this

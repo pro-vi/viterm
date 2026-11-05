@@ -149,6 +149,15 @@ pub(crate) struct SavedCursor {
     // TODO: selective_erase when supported
 }
 
+/// Identifies the primary or the alternate screen. Each numbers its rows
+/// independently, so a recorded row is only meaningful together with the
+/// screen it was recorded on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ScreenKind {
+    Primary,
+    Alternate,
+}
+
 struct ScreenOrAlt {
     /// The primary screen + scrollback
     screen: Screen,
@@ -235,6 +244,22 @@ impl ScreenOrAlt {
 
     pub fn is_alt_screen_active(&self) -> bool {
         self.alt_screen_is_active
+    }
+
+    pub fn active_kind(&self) -> ScreenKind {
+        if self.alt_screen_is_active {
+            ScreenKind::Alternate
+        } else {
+            ScreenKind::Primary
+        }
+    }
+
+    /// The given screen, whether or not it is the active one
+    pub fn by_kind_mut(&mut self, kind: ScreenKind) -> &mut Screen {
+        match kind {
+            ScreenKind::Primary => &mut self.screen,
+            ScreenKind::Alternate => &mut self.alt_screen,
+        }
     }
 
     pub fn saved_cursor(&mut self) -> &mut Option<SavedCursor> {

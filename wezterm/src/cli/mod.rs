@@ -17,6 +17,7 @@ mod proxy;
 mod rename_workspace;
 mod send_text;
 mod set_tab_title;
+mod set_window_name;
 mod set_window_title;
 mod spawn_command;
 mod split_pane;
@@ -156,6 +157,10 @@ Outputs the pane-id for the newly created pane on success"
     #[command(name = "set-window-title", rename_all = "kebab")]
     SetWindowTitle(set_window_title::SetWindowTitle),
 
+    /// Name a window; unlike its title, programs cannot change it
+    #[command(name = "set-window-name", rename_all = "kebab")]
+    SetWindowName(set_window_name::SetWindowName),
+
     /// Rename a workspace
     #[command(name = "rename-workspace", rename_all = "kebab")]
     RenameWorkspace(rename_workspace::RenameWorkspace),
@@ -197,6 +202,7 @@ async fn run_cli_async(opts: &crate::Opt, cli: CliCommand) -> anyhow::Result<()>
         CliSubCommand::ActivateTab(cmd) => cmd.run(client).await,
         CliSubCommand::SetTabTitle(cmd) => cmd.run(client).await,
         CliSubCommand::SetWindowTitle(cmd) => cmd.run(client).await,
+        CliSubCommand::SetWindowName(cmd) => cmd.run(client).await,
         CliSubCommand::RenameWorkspace(cmd) => cmd.run(client).await,
         CliSubCommand::ZoomPane(cmd) => cmd.run(client).await,
     }

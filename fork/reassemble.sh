@@ -37,7 +37,7 @@
 # Bash 3.2 compatible: this runs under /bin/bash on macOS.
 set -euo pipefail
 
-FORK_FILES="AGENTS.md CLAUDE.md PATCHES.md BACKLOG.md docs/plans fork"
+FORK_FILES="AGENTS.md CLAUDE.md PATCHES.md BACKLOG.md fork"
 TARGET="${REASSEMBLE_TARGET:-build-next}"
 UPSTREAM="${REASSEMBLE_BASE:-upstream/main}"
 

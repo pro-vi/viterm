@@ -1,3 +1,4 @@
+use crate::terminalstate::ScreenKind;
 use crate::{Position, StableRowIndex, TerminalState};
 use anyhow::Context;
 use humansize::{SizeFormatter, DECIMAL};
@@ -14,6 +15,8 @@ pub struct PlacementInfo {
     pub first_row: StableRowIndex,
     pub rows: usize,
     pub cols: usize,
+    /// The screen that `first_row` refers to
+    pub screen: ScreenKind,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -279,6 +282,7 @@ impl TerminalState {
             first_row,
             rows: height_in_cells,
             cols: width_in_cells,
+            screen: self.screen.active_kind(),
         })
     }
 

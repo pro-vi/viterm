@@ -2,6 +2,8 @@ use crate::termwindow::{PaneInformation, TabInformation, UIItem, UIItemType};
 use config::{ConfigHandle, TabBarColors};
 use finl_unicode::grapheme_clusters::Graphemes;
 use mlua::{FromLua, IntoLua};
+use mux::tab::TabId;
+use std::ops::Range;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 use termwiz::cell::{unicode_column_width, Cell, CellAttributes};
@@ -10,7 +12,7 @@ use termwiz::escape::csi::Sgr;
 use termwiz::escape::parser::Parser;
 use termwiz::escape::{Action, ControlCode, CSI};
 use termwiz::surface::SEQ_ZERO;
-use termwiz_funcs::{format_as_escapes, FormatColor, FormatItem};
+use termwiz_funcs::{format_as_escapes, truncate_right, FormatColor, FormatItem};
 use wezterm_term::{Line, Progress};
 use window::{IntegratedTitleButton, IntegratedTitleButtonAlignment, IntegratedTitleButtonStyle};
 
@@ -18,6 +20,9 @@ use window::{IntegratedTitleButton, IntegratedTitleButtonAlignment, IntegratedTi
 pub struct TabBarState {
     line: Line,
     items: Vec<TabEntry>,
+    /// The groups folded into one item each, indexed by
+    /// `TabBarItem::TabGroup::group_idx`.
+    folded: Vec<FoldedTabGroup>,
     /// When a tab shows the built-in indeterminate progress spinner, the instant
     /// at which the tab bar should be rebuilt to advance to the next frame;
     /// None when no spinner is visible.
@@ -31,9 +36,221 @@ pub enum TabBarItem {
     LeftStatus(usize),
     /// The right status area of the given tab bar row, counting from 0.
     RightStatus(usize),
-    Tab { tab_idx: usize, active: bool },
+    Tab {
+        tab_idx: usize,
+        active: bool,
+    },
+    /// A group of adjacent tabs drawn as one item; `active` when it holds
+    /// the active tab.
+    TabGroup {
+        group_idx: usize,
+        active: bool,
+    },
     NewTabButton,
     WindowButton(IntegratedTitleButton),
+}
+
+/// A run of tabs a config asked to show as one item, with
+/// `window:set_tab_groups`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TabGroupSpec {
+    pub tabs: Vec<TabId>,
+    pub label: String,
+    /// Tabs of the group to name after the label, in order, each by its
+    /// number and a glyph, such as a tab whose program waits for input.
+    pub marks: Vec<TabGroupMark>,
+    /// Text after the marks, such as a sign that some tab is busy.
+    pub busy: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TabGroupMark {
+    pub tab: TabId,
+    pub glyph: String,
+}
+
+/// The number the tab bar draws for the tab at `tab_index`.
+pub fn tab_number(tab_index: usize, zero_based: bool) -> usize {
+    if zero_based {
+        tab_index
+    } else {
+        tab_index + 1
+    }
+}
+
+/// The parts of a folded group's text: its tab numbers, its label, its marks
+/// (each a tab number and a glyph) and its busy text.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GroupTitle {
+    pub prefix: String,
+    pub label: String,
+    pub marks: Vec<String>,
+    pub busy: Option<String>,
+}
+
+impl GroupTitle {
+    /// The whole text, ` prefix label mark mark busy `.
+    pub fn text(&self) -> String {
+        self.compose(&self.label, self.marks.len(), true)
+    }
+
+    fn compose(&self, label: &str, marks: usize, busy: bool) -> String {
+        let mut out = format!("{}{}", self.prefix, label);
+        for mark in &self.marks[..marks] {
+            out.push(' ');
+            out.push_str(mark);
+        }
+        let dropped = self.marks.len() - marks;
+        if dropped > 0 {
+            out.push_str(&format!(" +{dropped}"));
+        }
+        if busy {
+            if let Some(b) = &self.busy {
+                out.push(' ');
+                out.push_str(b);
+            }
+        }
+        out.push(' ');
+        out
+    }
+
+    /// The text in at most `cells` cells, cut so that the marks go last: the
+    /// label shortens first, down to one character and an ellipsis; then the
+    /// busy text goes; then marks go from the end, `+n` saying how many.
+    /// The result is wider than `cells` when even the numbers, the shortest
+    /// label and `+n` do not fit; a caller that must fit then cuts it.
+    pub fn fit(&self, cells: usize) -> String {
+        let width = |s: &str| unicode_column_width(s, None);
+        let full = self.text();
+        if width(&full) <= cells {
+            return full;
+        }
+        let rest = width(&self.compose("", self.marks.len(), true));
+        if rest + 2 <= cells {
+            return self.compose(&shorten(&self.label, cells - rest), self.marks.len(), true);
+        }
+        let shortest = shorten(&self.label, 2);
+        (0..=self.marks.len())
+            .rev()
+            .map(|marks| self.compose(&shortest, marks, false))
+            .find(|text| width(text) <= cells)
+            .unwrap_or_else(|| self.compose(&shortest, 0, false))
+    }
+}
+
+/// `label` in at most `cells` cells, ending in an ellipsis when cut.
+fn shorten(label: &str, cells: usize) -> String {
+    if unicode_column_width(label, None) <= cells {
+        return label.to_string();
+    }
+    format!("{}\u{2026}", truncate_right(label, cells.saturating_sub(1)))
+}
+
+/// A group drawn as one item: the tabs it holds, in tab order, each with the
+/// title it would have in the bar.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FoldedTabGroup {
+    pub tabs: Range<usize>,
+    /// The ids of the tabs in `tabs`, which name the group while tabs move.
+    pub ids: Vec<TabId>,
+    pub titles: Vec<Line>,
+    /// The parts of the item's own text, for cutting it to a width.
+    pub text: GroupTitle,
+}
+
+impl FoldedTabGroup {
+    /// The group's tabs as (tab index, active, entry the tab bar's element
+    /// code draws).
+    pub fn entries(&self, active_tab: Option<usize>) -> Vec<(usize, bool, TabEntry)> {
+        self.tabs
+            .clone()
+            .zip(self.titles.iter())
+            .map(|(tab_idx, title)| {
+                let active = Some(tab_idx) == active_tab;
+                let entry = TabEntry {
+                    item: TabBarItem::Tab { tab_idx, active },
+                    title: title.clone(),
+                    x: 0,
+                    width: title.len(),
+                };
+                (tab_idx, active, entry)
+            })
+            .collect()
+    }
+}
+
+/// The groups that fold, as (index into `groups`, range of tab indices), in
+/// tab order. A group folds when it names two or more of the tabs in
+/// `tab_ids`, the window's tabs in order, and they are contiguous. A tab an
+/// earlier folded group took is not taken again; an id not in the window is
+/// ignored.
+pub fn folded_ranges(groups: &[TabGroupSpec], tab_ids: &[TabId]) -> Vec<(usize, Range<usize>)> {
+    let mut taken = vec![false; tab_ids.len()];
+    let mut out = vec![];
+    for (group_idx, group) in groups.iter().enumerate() {
+        let mut idxs: Vec<usize> = group
+            .tabs
+            .iter()
+            .filter_map(|id| tab_ids.iter().position(|t| t == id))
+            .filter(|&idx| !taken[idx])
+            .collect();
+        idxs.sort_unstable();
+        idxs.dedup();
+        if idxs.len() < 2 {
+            continue;
+        }
+        let range = idxs[0]..idxs[idxs.len() - 1] + 1;
+        if range.len() != idxs.len() {
+            continue;
+        }
+        for idx in range.clone() {
+            taken[idx] = true;
+        }
+        out.push((group_idx, range));
+    }
+    out.sort_by_key(|(_, range)| range.start);
+    out
+}
+
+/// The start of a folded group's item, before its label: a space, then the
+/// numbers of the first and last tabs it holds, numbered as the tab bar
+/// numbers tabs. A hint takes its cells (`hinted_title`).
+fn tab_group_prefix(tabs: &Range<usize>, show_index: bool, zero_based: bool) -> String {
+    if show_index {
+        format!(
+            " {}\u{2013}{}: ",
+            tab_number(tabs.start, zero_based),
+            tab_number(tabs.end - 1, zero_based)
+        )
+    } else {
+        " ".to_string()
+    }
+}
+
+/// The parts of a folded group's text: the numbers of the first and last
+/// tabs it holds, then its label, then its marks, each the number of its tab
+/// and its glyph, all numbered as the tab bar numbers tabs.
+fn group_title(
+    tabs: &Range<usize>,
+    tab_ids: &[TabId],
+    spec: &TabGroupSpec,
+    show_index: bool,
+    zero_based: bool,
+) -> GroupTitle {
+    let marks = spec
+        .marks
+        .iter()
+        .filter_map(|mark| {
+            let idx = tabs.clone().find(|&idx| tab_ids[idx] == mark.tab)?;
+            Some(format!("{}{}", tab_number(idx, zero_based), mark.glyph))
+        })
+        .collect();
+    GroupTitle {
+        prefix: tab_group_prefix(tabs, show_index, zero_based),
+        label: spec.label.clone(),
+        marks,
+        busy: spec.busy.clone(),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -237,12 +454,7 @@ fn compute_tab_title(
                 if config.show_tab_index_in_tab_bar {
                     let index = format!(
                         "{classic_spacing}{}: ",
-                        tab.tab_index
-                            + if config.tab_and_split_indices_are_zero_based {
-                                0
-                            } else {
-                                1
-                            }
+                        tab_number(tab.tab_index, config.tab_and_split_indices_are_zero_based)
                     );
                     len += unicode_column_width(&index, None);
                     items.push(FormatItem::Text(index));
@@ -322,8 +534,18 @@ impl TabBarState {
                 x: 1,
                 width: 1,
             }],
+            folded: vec![],
             next_progress_frame_due: None,
         }
+    }
+
+    pub fn folded(&self) -> &[FoldedTabGroup] {
+        &self.folded
+    }
+
+    /// The index of the folded group holding tab `tab_id`, if one does.
+    pub fn folded_group_of(&self, tab_id: TabId) -> Option<usize> {
+        self.folded.iter().position(|g| g.ids.contains(&tab_id))
     }
 
     pub fn line(&self) -> &Line {
@@ -438,6 +660,7 @@ impl TabBarState {
         config: &ConfigHandle,
         left_status: &[String],
         right_status: &[String],
+        groups: &[TabGroupSpec],
     ) -> Self {
         // Marshal every tab, every pane and the config into lua once here,
         // rather than once per compute_tab_title call below.
@@ -460,6 +683,7 @@ impl TabBarState {
                 config,
                 left_status,
                 right_status,
+                groups,
             ))
         });
 
@@ -476,6 +700,7 @@ impl TabBarState {
                     config,
                     left_status,
                     right_status,
+                    groups,
                 )
             }
         }
@@ -490,6 +715,7 @@ impl TabBarState {
         config: &ConfigHandle,
         left_status: &[String],
         right_status: &[String],
+        groups: &[TabGroupSpec],
     ) -> Self {
         // Row 0 is the row the single-row tab bar has always had, and is the
         // only one the retro tab bar can draw. Any further rows exist only
@@ -591,8 +817,7 @@ impl TabBarState {
             Self::integrated_title_buttons(mouse_x, &mut x, config, &mut items, &mut line, &colors);
         }
 
-        let left_status_line =
-            parse_status_text(&left_status_first, black_cell.attrs().clone());
+        let left_status_line = parse_status_text(&left_status_first, black_cell.attrs().clone());
         if left_status_line.len() > 0 {
             items.push(TabEntry {
                 item: TabBarItem::LeftStatus(0),
@@ -604,7 +829,86 @@ impl TabBarState {
             line.append_line(left_status_line, SEQ_ZERO);
         }
 
+        let tab_ids: Vec<TabId> = tab_info.iter().map(|tab| tab.tab_id).collect();
+        let fold = if tab_titles.is_empty() {
+            vec![]
+        } else {
+            folded_ranges(groups, &tab_ids)
+        };
+        let mut folded = vec![];
+        let mut fold_iter = fold.into_iter().peekable();
+        let mut skip_until = 0;
+
         for (tab_idx, tab_title) in tab_titles.iter().enumerate() {
+            if tab_idx < skip_until {
+                continue;
+            }
+            if let Some((group_idx, range)) = fold_iter.next_if(|(_, range)| range.start == tab_idx)
+            {
+                // Every member's title was computed above, so format-tab-title
+                // still runs for each tab; the popup lists them as drawn.
+                let titles = range
+                    .clone()
+                    .map(|idx| {
+                        let esc = format_as_escapes(tab_titles[idx].items.clone())
+                            .expect("already parsed ok above");
+                        parse_status_text(&esc, CellAttributes::default())
+                    })
+                    .collect();
+                let group_text = group_title(
+                    &range,
+                    &tab_ids,
+                    &groups[group_idx],
+                    config.show_tab_index_in_tab_bar,
+                    config.tab_and_split_indices_are_zero_based,
+                );
+                let text = group_text.text();
+                let width_guess = unicode_column_width(&text, None).min(tab_width_max);
+                let active = range.contains(&active_tab_no);
+                let hover = !active && is_tab_hover(mouse_x, x, width_guess);
+                let cell_attrs = if active {
+                    &active_cell_attrs
+                } else if hover {
+                    &inactive_hover_attrs
+                } else {
+                    &inactive_cell_attrs
+                };
+                let base_attrs = if config.use_fancy_tab_bar {
+                    CellAttributes::default()
+                } else {
+                    cell_attrs.clone()
+                };
+                let mut group_line = parse_status_text(&text, base_attrs.clone());
+                let title = group_line.clone();
+                if group_line.len() > tab_width_max {
+                    // Cut so that the marks go last (`GroupTitle::fit`).
+                    group_line = parse_status_text(&group_text.fit(tab_width_max), base_attrs);
+                    if group_line.len() > tab_width_max {
+                        group_line.resize(tab_width_max, SEQ_ZERO);
+                    }
+                }
+                let width = group_line.len();
+                items.push(TabEntry {
+                    item: TabBarItem::TabGroup {
+                        group_idx: folded.len(),
+                        active,
+                    },
+                    title,
+                    x,
+                    width,
+                });
+                folded.push(FoldedTabGroup {
+                    tabs: range.clone(),
+                    ids: tab_ids[range.clone()].to_vec(),
+                    titles,
+                    text: group_text,
+                });
+                line.append_line(group_line, SEQ_ZERO);
+                x += width;
+                skip_until = range.end;
+                continue;
+            }
+
             let tab_title_len = tab_title.len.min(tab_width_max);
             let active = tab_idx == active_tab_no;
             let hover = !active && is_tab_hover(mouse_x, x, tab_title_len);
@@ -781,6 +1085,7 @@ impl TabBarState {
         Self {
             line,
             items,
+            folded,
             next_progress_frame_due: has_indeterminate_progress.then(next_spinner_frame_due),
         }
     }
@@ -905,4 +1210,245 @@ pub fn parse_status_text(text: &str, default_cell: CellAttributes) -> Line {
     });
     flush_print(&mut print_buffer, &mut cells, &pen);
     Line::from_cells(cells, SEQ_ZERO)
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    fn spec(tabs: &[TabId], label: &str) -> TabGroupSpec {
+        TabGroupSpec {
+            tabs: tabs.to_vec(),
+            label: label.to_string(),
+            marks: vec![],
+            busy: None,
+        }
+    }
+
+    fn title(marks: &[&str], busy: Option<&str>) -> GroupTitle {
+        GroupTitle {
+            prefix: " 5\u{2013}10: ".to_string(),
+            label: "philemon".to_string(),
+            marks: marks.iter().map(|m| m.to_string()).collect(),
+            busy: busy.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn a_tab_number_counts_from_one_unless_indices_are_zero_based() {
+        assert_eq!(tab_number(4, false), 5);
+        assert_eq!(tab_number(4, true), 4);
+    }
+
+    #[test]
+    fn a_group_title_names_its_marks_after_its_label() {
+        assert_eq!(
+            title(&["7!", "6\u{2713}", "8\u{25c6}"], Some("\u{25cc}")).text(),
+            " 5\u{2013}10: philemon 7! 6\u{2713} 8\u{25c6} \u{25cc} "
+        );
+        assert_eq!(title(&[], None).text(), " 5\u{2013}10: philemon ");
+    }
+
+    #[test]
+    fn a_group_title_that_fits_is_not_cut() {
+        let t = title(&["7!"], None);
+        assert_eq!(t.fit(100), t.text());
+    }
+
+    #[test]
+    fn a_group_title_shortens_its_label_before_any_mark() {
+        let t = title(&["7!", "6\u{2713}"], Some("\u{25cc}"));
+        // prefix 7 cells, " 7! 6✓ ◌ " 9 cells: 16 cells leave 4 for the label.
+        assert_eq!(
+            t.fit(20),
+            " 5\u{2013}10: phi\u{2026} 7! 6\u{2713} \u{25cc} "
+        );
+    }
+
+    #[test]
+    fn a_group_title_drops_busy_then_marks_from_the_end() {
+        let t = title(&["7!", "6\u{2713}", "8\u{25c6}"], Some("\u{25cc}"));
+        assert_eq!(t.fit(19), " 5\u{2013}10: p\u{2026} 7! 6\u{2713} 8\u{25c6} ");
+        // Two marks and "+1" need 19 cells, so 18 keeps one mark.
+        assert_eq!(t.fit(18), " 5\u{2013}10: p\u{2026} 7! +2 ");
+        assert_eq!(t.fit(14), " 5\u{2013}10: p\u{2026} +3 ");
+    }
+
+    #[test]
+    fn a_group_title_never_cuts_its_numbers_or_a_mark() {
+        let t = title(&["7!", "6\u{2713}"], None);
+        let tight = t.fit(3);
+        assert!(tight.starts_with(" 5\u{2013}10: "));
+        assert!(tight.contains(" +2"));
+    }
+
+    #[test]
+    fn a_group_numbers_its_marks_as_the_bar_numbers_tabs() {
+        let mut s = spec(&[11, 12, 13], "p");
+        s.marks = vec![
+            TabGroupMark {
+                tab: 12,
+                glyph: "!".to_string(),
+            },
+            TabGroupMark {
+                tab: 99,
+                glyph: "?".to_string(),
+            },
+        ];
+        let ids = [10, 11, 12, 13];
+        assert_eq!(
+            group_title(&(1..4), &ids, &s, true, false).marks,
+            vec!["3!"]
+        );
+        assert_eq!(group_title(&(1..4), &ids, &s, true, true).marks, vec!["2!"]);
+        assert_eq!(
+            group_title(&(1..4), &ids, &s, true, true).prefix,
+            " 1\u{2013}3: "
+        );
+    }
+
+    fn tab(tab_id: TabId, tab_index: usize, is_active: bool) -> TabInformation {
+        TabInformation {
+            tab_id,
+            tab_index,
+            is_active,
+            is_last_active: false,
+            active_pane: None,
+            window_id: 0,
+            tab_title: format!("t{tab_id}"),
+        }
+    }
+
+    #[test]
+    fn a_group_of_adjacent_tabs_folds() {
+        let ids = [10, 11, 12, 13, 14];
+        assert_eq!(
+            folded_ranges(&[spec(&[12, 11], "p")], &ids),
+            vec![(0, 1..3)]
+        );
+    }
+
+    #[test]
+    fn a_group_whose_tabs_are_apart_does_not_fold() {
+        let ids = [10, 11, 12, 13];
+        assert_eq!(folded_ranges(&[spec(&[10, 12], "p")], &ids), vec![]);
+    }
+
+    #[test]
+    fn a_group_of_one_tab_does_not_fold() {
+        let ids = [10, 11];
+        assert_eq!(folded_ranges(&[spec(&[11], "p")], &ids), vec![]);
+        assert_eq!(folded_ranges(&[spec(&[11, 11], "p")], &ids), vec![]);
+    }
+
+    #[test]
+    fn a_tab_in_two_groups_belongs_to_the_first() {
+        let ids = [10, 11, 12, 13];
+        let groups = [spec(&[11, 12], "a"), spec(&[12, 13], "b")];
+        assert_eq!(folded_ranges(&groups, &ids), vec![(0, 1..3)]);
+    }
+
+    #[test]
+    fn ids_not_in_the_window_are_ignored() {
+        let ids = [10, 11, 12];
+        assert_eq!(
+            folded_ranges(&[spec(&[99, 11, 12], "p")], &ids),
+            vec![(0, 1..3)]
+        );
+    }
+
+    #[test]
+    fn folded_ranges_come_back_in_tab_order() {
+        let ids = [10, 11, 12, 13, 14];
+        let groups = [spec(&[13, 14], "late"), spec(&[10, 11], "early")];
+        assert_eq!(folded_ranges(&groups, &ids), vec![(1, 0..2), (0, 3..5)]);
+    }
+
+    #[test]
+    fn a_group_reads_its_first_and_last_tab_numbers() {
+        let s = spec(&[11, 12, 13], "work");
+        let ids = [10, 11, 12, 13];
+        let text = |show, zero| group_title(&(1..4), &ids, &s, show, zero).text();
+        assert_eq!(text(true, false), " 2\u{2013}4: work ");
+        assert_eq!(text(true, true), " 1\u{2013}3: work ");
+        assert_eq!(text(false, false), " work ");
+    }
+
+    #[test]
+    fn the_bar_draws_a_folded_group_as_one_item_in_place_of_its_tabs() {
+        let config = ConfigHandle::default_config();
+        let tabs: Vec<TabInformation> = (0..6).map(|i| tab(10 + i, i as usize, i == 2)).collect();
+        let bar = TabBarState::build(
+            None,
+            200,
+            None,
+            &tabs,
+            None,
+            &config,
+            &[],
+            &[],
+            &[spec(&[11, 12, 13], "work")],
+        );
+        let kinds: Vec<TabBarItem> = bar
+            .items()
+            .iter()
+            .map(|e| e.item)
+            .filter(|i| matches!(i, TabBarItem::Tab { .. } | TabBarItem::TabGroup { .. }))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                TabBarItem::Tab {
+                    tab_idx: 0,
+                    active: false
+                },
+                TabBarItem::TabGroup {
+                    group_idx: 0,
+                    active: true
+                },
+                TabBarItem::Tab {
+                    tab_idx: 4,
+                    active: false
+                },
+                TabBarItem::Tab {
+                    tab_idx: 5,
+                    active: false
+                },
+            ]
+        );
+        let group = &bar.folded()[0];
+        assert_eq!(group.tabs, 1..4);
+        assert_eq!(group.titles.len(), 3);
+        let text = bar
+            .items()
+            .iter()
+            .find(|e| matches!(e.item, TabBarItem::TabGroup { .. }))
+            .map(|e| e.title.as_str().to_string())
+            .unwrap();
+        assert_eq!(text, " 2\u{2013}4: work ");
+    }
+
+    #[test]
+    fn a_group_not_folding_leaves_every_tab_in_the_bar() {
+        let config = ConfigHandle::default_config();
+        let tabs: Vec<TabInformation> = (0..4).map(|i| tab(10 + i, i as usize, false)).collect();
+        let bar = TabBarState::build(
+            None,
+            200,
+            None,
+            &tabs,
+            None,
+            &config,
+            &[],
+            &[],
+            &[spec(&[10, 12], "apart")],
+        );
+        let tabs_drawn = bar
+            .items()
+            .iter()
+            .filter(|e| matches!(e.item, TabBarItem::Tab { .. }))
+            .count();
+        assert_eq!(tabs_drawn, 4);
+        assert!(bar.folded().is_empty());
+    }
 }

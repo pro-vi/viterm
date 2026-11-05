@@ -12,7 +12,9 @@ not been drawn yet. The value is a table with these fields:
 * `rows_full` - the fewest rows that hold every tab with every title in full,
   or `nil` when that would take more than 8 rows
 * `title_width` - the number of cells that long titles are cut to now
-* `tabs_per_row` - an array with the number of tabs on each row, top row first
+* `tabs_per_row` - an array with the number of items on each row, top row
+  first; a tab group drawn as one item (see
+  [set_tab_groups](set_tab_groups.md)) counts as one
 
 This example uses the fewest rows that hold every tab whenever the number of
 tabs changes:
