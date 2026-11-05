@@ -145,6 +145,14 @@ Named `tabbar-title-memo` until 2026-10-02; plans written before then use that n
 - needs: `unit/resync-no-resize-echo`
 - why: `RequestedSize::reconcile_server_size` answers a reported size with the pane's own size once per pair of reported and own size, and a report different from the last one arms a new answer. Two clients alternate between two reports, so the pair stops them (`two_clients_at_different_sizes_settle`). Three or more clients holding one pane at three or more sizes do not stop: a test that tried every order of observations by three clients at 25, 30 and 35 rows found orders where every observation sends, 12 sends in 12 steps from each starting size (run on `unit/resync-no-resize-echo` at `f0870e32a`, 2026-10-28, not committed). Each send changes the server's size, which announces `TabResized` to every client, so such an order keeps itself going; how often real resync timing produces it is not measured. Found by the gate review of 2026-10-28 (`build` at `2413d9898`). The change: spend the answer budget only on this client's own events (a layout resize, a focus), not on a different report, and add a three-client test that searches observation orders rather than one rotation. Until then the unit's guarantee is for two clients.
 
+### `top-level-split-tab-size`
+
+- side: server
+- state: proposed
+- needs: a choice between carrying wezterm/wezterm#7654 and wezterm/wezterm#8267, which both restore the tab's recorded size after a top level split; a mux restart to take effect
+- why: A top level split into a tab with two or more panes shrinks the tab's recorded size (`TabInner.size`) and nothing restores it (wezterm/wezterm#4984). `split-checks-first` checks a split against that size, so a pane moved within such a tab can pass the check and still fail once it is removed, which leaves it in no tab. Reproduced 2026-11-05 on engine `20261105-002721-86455274`, on a throwaway mux server: A, then B split below A, then C from `split-pane --pane-id A --top-level --right`; `split-pane --pane-id A --bottom --move-pane-id C` fails "No space for split!" and C drops out of `cli list`.
+- notes: `2026-11-04-failed-move-split-strands-pane.md`
+
 ## Deferred
 
 Decided against for the current topology (one GUI on `human-main`). Not retired; the row returns to Open if the need does.
