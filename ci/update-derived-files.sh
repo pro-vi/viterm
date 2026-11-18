@@ -46,6 +46,7 @@ for cmd in \
     rename-workspace \
     send-text \
     set-tab-title \
+    set-window-name \
     set-window-title \
     spawn \
     split-pane \
