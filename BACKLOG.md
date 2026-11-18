@@ -86,8 +86,16 @@ Named `tabbar-title-memo` until 2026-10-02; plans written before then use that n
 - side: server
 - state: proposed
 - needs: a sign that the queue grows in practice: the GUI's `get_pane_render_changes` count stops rising while the mux server's footprint climbs. Until that is seen, a change to the push path has nothing to prove itself against
+- seen: 2026-11-17, the sign the line above asks for. A GUI read nothing for 41 minutes (stopped: its footprint did not change and its log was silent), and the mux server's footprint rose from 916 MB to 3,294 MB, about 57 MB a minute, on 16 seconds of CPU. It was back at 921 MB within a minute of the GUI running again. The server ran engine `20261018-200420-656e4f47`.
 - why: Each session's outgoing queue (`dispatch.rs`, `smol::channel::unbounded::<Item>()`) takes every push with `try_send`, and `compute_changes()` queues a full `GetPaneRenderChangesResponse` for each output event of each subscribed pane, so one connected client that stops reading grows the server without limit. `mux-render-subscribers` stopped pushes to connections that subscribe to nothing, the multiplier inferred for the server that grew to 296 GB and was killed on 2026-10-08 (queue sizes were not recorded). Since then one server ran from 2026-10-10 to 2026-10-19 between 330 MB and 1.85 GB, and grew 180 MB during seven hours of a saturated GUI main thread on 2026-10-17. If it is built: keep at most one pending render push per pane per session, the newest replacing an unsent one, so a stalled reader costs one push per pane; closing a session whose queue passes a byte limit is the alternative
 - notes: `2026-10-11-per-session-push-queue-still-unbounded.md`
+
+### `client-line-cache-limit`
+
+- side: gui
+- state: proposed
+- needs: a window that has run `pr-7704-line-cache-capacity` for 14 days, read with `fork/line-cache-harness/live-check.py`: how far its footprint sits under the ceiling says whether a lower limit is worth an option
+- why: With `pr-7704-line-cache-capacity` a client pane caches at most `scrollback_lines` lines, the number the server keeps. The harness measured about 3.6 KB for a cached line of 112 coloured columns, so at `scrollback_lines = 50000` one pane may hold 180 MB and 148 panes 25 GB. The two numbers do different jobs: the server's is how far back a pane can be read, the client's only saves a fetch when a row is drawn again. If it is built: a client option for the cache size, read in `RenderableInner::new` and defaulting to `scrollback_lines`. Not tried: passing a lower `scrollback_lines` to the GUI alone with `--config`, which needs no engine change if nothing else in the GUI reads the option for a mux pane. Either way a row dropped from the cache is fetched again when it is scrolled to.
 
 ### `tab-bar-drag`
 
