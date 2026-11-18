@@ -28,7 +28,18 @@ class RusageInfoV0(ctypes.Structure):
 
 libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
 libproc.proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
-usage = RusageInfoV0()
-if libproc.proc_pid_rusage(int(sys.argv[1]), 0, ctypes.byref(usage)) != 0:  # RUSAGE_INFO_V0
-    sys.exit("proc_pid_rusage failed: errno %d" % ctypes.get_errno())
-print(usage.phys_footprint)
+
+
+def footprint_bytes(pid):
+    """The footprint of `pid` in bytes, or None when the kernel refuses the read."""
+    usage = RusageInfoV0()
+    if libproc.proc_pid_rusage(int(pid), 0, ctypes.byref(usage)) != 0:  # RUSAGE_INFO_V0
+        return None
+    return usage.phys_footprint
+
+
+if __name__ == "__main__":
+    value = footprint_bytes(sys.argv[1])
+    if value is None:
+        sys.exit("proc_pid_rusage failed: errno %d" % ctypes.get_errno())
+    print(value)
