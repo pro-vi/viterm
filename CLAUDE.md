@@ -48,6 +48,15 @@ It is: *does this need another unit's code in order to compile and work?*
   `unit/tab-bar-row-status` is the example: there is no second row to put a
   status on without `unit/tab-bar-rows`.
 
+Before writing a unit for a defect in upstream's code, search wezterm/wezterm
+for a pull request that already fixes it, and carry that one as
+`pr-<number>-<slug>`: it keeps its author, and `git cherry` retires the unit
+when upstream merges it, which a second patch for the same defect cannot do.
+Search by the name of the function or type as well as by the symptom
+(`gh search issues --repo wezterm/wezterm --include-prs '<name>'`), and read
+the pull requests an issue's thread links: a pull request is titled after its
+code change, so a search for the symptom can miss it.
+
 ```bash
 git switch -c unit/<slug> upstream/main     # or off the unit it truly needs
 # … one change, one commit, message written for an upstream reader:
