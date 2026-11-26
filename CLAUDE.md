@@ -57,12 +57,28 @@ Search by the name of the function or type as well as by the symptom
 the pull requests an issue's thread links: a pull request is titled after its
 code change, so a search for the symptom can miss it.
 
+`upstream/main` here means the upstream commit `build` stands on,
+`git merge-base build upstream/main`. Once a fetch has moved `upstream/main`
+past it, cut the unit from that commit: `git merge --no-ff` brings in the
+unit's whole history, so a unit cut from the newer `upstream/main` would carry
+upstream's new commits into `build` outside a reassembly. Its ledger `base`
+still says `upstream/main`, and the next reassembly rebases it with the rest.
+
+Build the unit in a worktree of its own, so `build` stays checked out here. A
+new worktree has no compiled target, so clone the one of a worktree on the
+same base: `cp -cR <that worktree>/target <new worktree>/target`. On APFS the
+clone takes no extra disk space, and Cargo then rebuilds the workspace crates,
+whose paths differ, and reuses the rest: on 2026-11-25 the GUI's debug build
+compiled 61 crates, 60 of them the workspace's own, in 2 min 26 s with
+`CARGO_BUILD_JOBS=1`.
+
 ```bash
-git switch -c unit/<slug> upstream/main     # or off the unit it truly needs
+git worktree add -b unit/<slug> ~/Development/_worktrees/viterm-<slug> \
+  $(git merge-base build upstream/main)      # or off the unit it truly needs
 # … one change, one commit, message written for an upstream reader:
 #   no mention of bootstrap, ViTerm, this machine, or a plan …
 cargo check                                  # the unit must pass on its own
-git switch build
+# then, in this checkout, where build is checked out:
 git merge --no-ff unit/<slug>
 # add its row to PATCHES.md and commit that separately
 ```
