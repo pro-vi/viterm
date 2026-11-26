@@ -4,8 +4,8 @@ Units that have no branch yet. `PATCHES.md` holds every unit that has one; an
 entry leaves this file at the moment `git switch -c unit/<slug>` is run. The
 entries the plan of 2026-09-06 proposed keep its relative order, minus
 `mux-socket-buffers`, which has a branch and so lives in `PATCHES.md`.
-`tab-order-on-reattach` replaces that plan's `tab-order-over-protocol` (the
-need, not a chosen mechanism). `flash-message`, `picker-modal` and
+That plan's `tab-order-over-protocol` has a branch now and lives in
+`PATCHES.md`. `flash-message`, `picker-modal` and
 `mux-push-queue-bound` came later and have no place in that order yet. Deferred units are decided against
 for the current topology, not retired; they return if the need does. The
 `notes:` lines name investigation notes in `.inbox/`, which is local to this
@@ -57,14 +57,6 @@ Named `tabbar-title-memo` until 2026-10-02; plans written before then use that n
 - why: A `ClientPane` starts with an empty `user_vars` map and learns only from live `Alert::SetUserVar`, so state carried in user vars is missing after every GUI relaunch. Send each pane's current vars when a client attaches it
 - notes: `2026-09-06-viterm-freeze-fork-plan.md`
 
-### `tab-order-on-reattach`
-
-- side: gui or protocol, depending on the mechanism
-- state: proposed
-- needs: A choice of mechanism. Isolation is not a prerequisite while there is one GUI. The protocol path needs GUI and mux server built from the same commit. The config-replay path needs no codec change and no mux restart
-- why: A reordered tab reverts on GUI relaunch / engine install, because `codec` has no tab-move message. The server does hold an order; nothing can permute it. Reproduced 2026-09-19: `MoveTabRelative` in one GUI was invisible to the server and gone after reattach. That is the useful part for this machine: ~28 tabs as spatial memory. Two candidate solutions, neither chosen: (1) canonical `MoveTab` over the protocol, the original `tab-order-over-protocol` unit — an existing client is not re-ordered by a resync, so the order needs its own apply path, and a local window can span several remote windows, so a move names a remote window and a remote tab; (2) Lua replay on attach from `window:mux_window():tabs()` plus `MoveTab`, no protocol change. (2) has to key on tab title or a pane's launch id, because a Lua `tab:tab_id()` is a local id regenerated per GUI process, so it matches by name rather than identity. Drawn-bar jump already uses `mux_window:tabs_with_info()` and does not need this
-- notes: `2026-09-19-mux-viewer-selection-and-tab-order.md`, `2026-09-06-viterm-freeze-fork-plan.md`
-
 ### `vertical-tabs`
 
 - side: gui
@@ -94,19 +86,107 @@ Named `tabbar-title-memo` until 2026-10-02; plans written before then use that n
 - side: server
 - state: proposed
 - needs: a sign that the queue grows in practice: the GUI's `get_pane_render_changes` count stops rising while the mux server's footprint climbs. Until that is seen, a change to the push path has nothing to prove itself against
+- seen: 2026-11-17, the sign the line above asks for. A GUI read nothing for 41 minutes (stopped: its footprint did not change and its log was silent), and the mux server's footprint rose from 916 MB to 3,294 MB, about 57 MB a minute, on 16 seconds of CPU. It was back at 921 MB within a minute of the GUI running again. The server ran engine `20261018-200420-656e4f47`.
 - why: Each session's outgoing queue (`dispatch.rs`, `smol::channel::unbounded::<Item>()`) takes every push with `try_send`, and `compute_changes()` queues a full `GetPaneRenderChangesResponse` for each output event of each subscribed pane, so one connected client that stops reading grows the server without limit. `mux-render-subscribers` stopped pushes to connections that subscribe to nothing, the multiplier inferred for the server that grew to 296 GB and was killed on 2026-10-08 (queue sizes were not recorded). Since then one server ran from 2026-10-10 to 2026-10-19 between 330 MB and 1.85 GB, and grew 180 MB during seven hours of a saturated GUI main thread on 2026-10-17. If it is built: keep at most one pending render push per pane per session, the newest replacing an unsent one, so a stalled reader costs one push per pane; closing a session whose queue passes a byte limit is the alternative
 - notes: `2026-10-11-per-session-push-queue-still-unbounded.md`
 
+### `client-line-cache-limit`
+
+- side: gui
+- state: proposed
+- needs: a window that has run `pr-7704-line-cache-capacity` for 14 days, read with `fork/line-cache-harness/live-check.py`: how far its footprint sits under the ceiling says whether a lower limit is worth an option
+- why: With `pr-7704-line-cache-capacity` a client pane caches at most `scrollback_lines` lines, the number the server keeps. The harness measured about 3.6 KB for a cached line of 112 coloured columns, so at `scrollback_lines = 50000` one pane may hold 180 MB and 148 panes 25 GB. The two numbers do different jobs: the server's is how far back a pane can be read, the client's only saves a fetch when a row is drawn again. If it is built: a client option for the cache size, read in `RenderableInner::new` and defaulting to `scrollback_lines`. Not tried: passing a lower `scrollback_lines` to the GUI alone with `--config`, which needs no engine change if nothing else in the GUI reads the option for a mux pane. Either way a row dropped from the cache is fetched again when it is scrolled to.
+
+### `window-name-resend-same-name`
+
+- side: gui
+- state: proposed
+- needs: the next reassembly of `build`, because the change is a fixup on `unit/window-name`, which is already merged. `fork/reassemble.sh check` refuses one today: `split-resize-keeps-ratio`, `tab-order-over-protocol`, `mux-window-set-tab-order` and `tab-group-hints` do not contain their bases
+- why: In a GUI attached to a mux server, `MuxWindow:set_name` reaches the server only when the name differs from the GUI's own copy of the window (`Window::set_name` in `mux/src/window.rs` notifies only `if self.name != name`, and `mux_notify_client_domain` forwards that notification as `SetWindowName`). Nothing updates that copy from the server, and a client window starts with an empty name, so after `wezterm cli set-window-name` names a window, setting `""` from the GUI changes nothing locally, sends nothing, and the server keeps the name; re-setting a name the CLI changed meanwhile fails the same way. Found by reading `bb40decc4`; the GUI path was not run. Decided: drop the equality check so `set_name` always notifies. Upstream's `set_title` keeps the same check, but there the server pushes title changes back to clients, and names are never pushed, so the GUI's copy cannot be trusted to say whether the server needs the name. A notification without a change costs one PDU. Test: on a throwaway server, name a window with the CLI, then `set_name("")` from an attached GUI clears it. Nothing depends on it today: bootstrap's key names windows with `wezterm cli set-window-name`
+- notes: `2026-10-27-gui-set-name-cannot-clear-server-name.md`
+
+### `image-minify-sampling`
+
+- side: gui
+- state: proposed
+- needs: a design for images drawn at less than half their size, and a look at a drawn result, by a person or a screenshot through Agent Desktop Host
+- why: Every image cell is drawn with the nearest-texel sampler: `populate_image_quad` marks the quad `set_has_color(true)`, and the `IS_COLOR_EMOJI` branch of `fs_main` in `wezterm-gui/src/shader.wgsl` reads only `nearest_tex`, while window backgrounds (`IS_BG_IMAGE`) read `linear_tex`. A picture drawn smaller than its own pixels therefore skips source pixels instead of averaging them; bootstrap's image viewer draws from 10% to 1600% and sees it below 100% (read in the shader source, not compared as images). Switching image cells to the linear sampler averages a 2 × 2 block, so it fixes scales down to 50% and still skips pixels below that; scales below 50% need a downscaled copy of the image (the atlas already scales down images that do not fit, `AllowImage::Scale`) or mip levels. Upscaled images should keep nearest sampling, which keeps pixel art sharp, and colour emoji glyphs keep theirs. No wezterm/wezterm issue or pull request covers it (searched 2026-11-25)
+- notes: `2026-10-23-image-sampling-and-kitty-animation.md`
+
+### `tab-bar-drag`
+
+- side: gui
+- state: proposed
+- needs: `unit/tab-groups` (base). Plan `docs/plans/2026-10-20-001-feat-tab-groups-plan.md` U10.
+- why: A press, drag and release on a tab or a folded tab group in the fancy tab bar should move it, a group moving its whole run, through `Window::set_tab_order` and `WindowTabOrderChanged` as `move_tab` does; a config that keeps a folder order (bootstrap's `tab_groups.lua`) then reads the new order on its next tick. Today the order changes only through `MoveTab` keys and Lua. The new order is a pure function of (items, dragged item, drop slot), which is the tested seam; no tool here drives mouse input into a native window, so the press path waits for a person.
+
+### `tab-bar-motion`
+
+- side: gui
+- state: proposed
+- needs: `unit/tab-groups` (base). Plan `docs/plans/2026-10-20-001-feat-tab-groups-plan.md` U11.
+- why: When a folded group opens or closes, or a tab moves into its group, the drawn boxes jump between layouts. Keeping each item's previous rect by key and easing to the new one over about half a second, with frames scheduled through `update_next_frame_time` (the spinner's path), would show the move without any Lua during it; with the window unfocused the final layout is drawn at once. `colorease.rs` has curves; nothing eases a position yet.
+
+### `tab-groups-live-check`
+
+- side: gui
+- state: proposed
+- needs: `unit/tab-groups`, `unit/mux-window-set-tab-order`; bootstrap's `configs/wezterm/tab_groups.lua` driver.
+- why: Nothing re-runs the tab groups on an engine. Bootstrap's CI checks the driver on fake window objects only, and its GUI lane runs stock wezterm, which has no `set_tab_groups`. A case in `fork/tab-sync-harness` (or beside it) on a throwaway mux and GUI would open tabs across projects from a checkout map, assert that each project's tabs are contiguous in the server's order and that `tab_bar_fit` counts each folded group as one item, toggle the popup with `window:toggle_tab_group_popup()`, restart the GUI on an edited saved order while tabs arrive over several ticks, and run once more against an engine without the methods to see nothing change. Since 2026-10-21 it should also call `show_tab_group_hints()` and `open_tab_group_popup(i)` and check their returns, and cut a group with marks to a narrow row to see its marks kept (`docs/plans/2026-10-21-001-feat-tab-group-peek-plan.md`). The same steps were run by hand on engine 20261020-072440-1f588a65 against a mux of the same build and one of 20261018-200420-656e4f47. Signal: none: no job runs the tab groups on an engine. Promote when the next change to the driver or to the engine's tab group code is made.
+
+### `tab-order-two-gui-settle`
+
+- side: both
+- state: proposed
+- needs: `unit/tab-order-over-protocol`, `unit/mux-window-set-tab-order`; bootstrap's `configs/wezterm/tab_groups.lua` driver; a mux server on an engine that takes tab orders.
+- why: Once the server owns tab order, every GUI attached to it runs bootstrap's tab groups driver, which calls `MuxWindow:set_tab_order` on a status tick whenever its own arrangement differs from the window's order. Another GUI's reorder arrives as the server's order and the driver follows it as a hand move, so two GUIs that see the same pane directories and checkout map should settle on one order within a tick; nothing has shown it, and a GUI that learns a tab's directory a tick before the other arranges that tab differently for that tick. A case beside `tab-groups-live-check`: two GUIs with the driver on one throwaway server, tabs across projects, then a minute idle, asserting that each GUI's received `TabAddedToWindow` count stops rising after the first arrangement. Signal: `mux.client.recv.TabAddedToWindow` (from `client-resync-counters`) rising in an idle GUI's stats. Promote when the mux server first runs an engine that takes tab orders while two GUIs are attached.
+
+### `tab-order-new-tab-place`
+
+- side: gui
+- state: proposed
+- needs: `unit/tab-order-over-protocol`
+- why: While a tab move made in this client is in flight, a pane list's order is skipped but its new tabs are still added, at the end of their local window (`process_pane_list` appends with `push_tab`). A move sent before the skipped order is read again names every tab of the window, that new tab last, and a server that takes tab orders puts it there: another client's placement of the tab is undone, and every GUI then shows it last. Found by the harden review's fourth gate (invariance) on 2026-10-20 at d63a62ae4. The narrow change: a tab a list adds to an existing local window goes after the tab before it in the list, not at the end; an older server always appends, so nothing changes against one. Test pair: with a move in flight, a list that adds a tab at the front, then a second move, must not send the new tab last; with no move in flight the list's order is shown as now. Signal: none, since nothing records a request that moves a tab no user moved. Promote when a tab another GUI placed is seen at the end after a move here, or when the list application is next changed.
+
+### `tab-group-hint-key-repeat`
+
+- side: gui
+- state: proposed
+- needs: `unit/tab-group-hints`
+- why: `Modal::key_down` is not told when a key is a repeat. A hint letter held past the key-repeat delay opens group k's popup on the press, and the repeat then picks the popup's tab with the same letter, because both hint lists start at the alphabet's first letter. Found by the gate review of 2026-10-21 (build at 8c390b4cd). The change: let a repeat neither pick nor close a tab group modal, by passing the repeat flag to `key_down` or by dropping repeats in `key_event_impl` while one is open. Test: a repeat of the letter that opened a popup leaves the popup open and activates nothing. Signal: none. Promote when a held hint letter is seen landing on a tab, or when the modal key path is next changed.
+
+### `tab-group-modal-pane-paths`
+
+- side: gui
+- state: proposed
+- needs: `unit/tab-group-popup-keys`
+- why: Two key paths reach the pane without passing the open tab group modal a chance to close, so the key arrives with the popup or the hints still drawn. Text an input method commits arrives as `Key::Composed`, which no modal sees, so with a Chinese input source on a hint letter does not pick. An Alt key that `send_composed_key_when_left_alt_is_pressed = false` (or the right or generic Alt setting) sends raw is written to the pane by `process_key`'s `bypass_compose` branch after the modal passed it. Found by the gate review of 2026-10-21 and read in `keyevent.rs` at 7cd3ff040, not run. The change: close a tab group modal on either path before the key goes on, as `key_down_unbound` does for an unbound key. Test: with hints shown, committed composed text and a bypassed Alt key each close them and reach the pane once. Signal: none. Promote when hints or the popup are used with an input method on, or when either path is next changed.
+
+### `resize-answer-three-clients`
+
+- side: gui
+- state: proposed
+- needs: `unit/resync-no-resize-echo`
+- why: `RequestedSize::reconcile_server_size` answers a reported size with the pane's own size once per pair of reported and own size, and a report different from the last one arms a new answer. Two clients alternate between two reports, so the pair stops them (`two_clients_at_different_sizes_settle`). Three or more clients holding one pane at three or more sizes do not stop: a test that tried every order of observations by three clients at 25, 30 and 35 rows found orders where every observation sends, 12 sends in 12 steps from each starting size (run on `unit/resync-no-resize-echo` at `f0870e32a`, 2026-10-28, not committed). Each send changes the server's size, which announces `TabResized` to every client, so such an order keeps itself going; how often real resync timing produces it is not measured. Found by the gate review of 2026-10-28 (`build` at `2413d9898`). The change: spend the answer budget only on this client's own events (a layout resize, a focus), not on a different report, and add a three-client test that searches observation orders rather than one rotation. Until then the unit's guarantee is for two clients.
+
+### `top-level-split-tab-size`
+
+- side: server
+- state: proposed
+- needs: a choice between carrying wezterm/wezterm#7654 and wezterm/wezterm#8267, which both restore the tab's recorded size after a top level split; a mux restart to take effect
+- why: A top level split into a tab with two or more panes shrinks the tab's recorded size (`TabInner.size`) and nothing restores it (wezterm/wezterm#4984). `split-checks-first` checks a split against that size, so a pane moved within such a tab can pass the check and still fail once it is removed, which leaves it in no tab. Reproduced 2026-11-05 on engine `20261105-002721-86455274`, on a throwaway mux server: A, then B split below A, then C from `split-pane --pane-id A --top-level --right`; `split-pane --pane-id A --bottom --move-pane-id C` fails "No space for split!" and C drops out of `cli list`.
+- notes: `2026-11-04-failed-move-split-strands-pane.md`
+
 ## Deferred
 
-Decided against for the current topology (one GUI on `human-main`). Not retired; the row returns to Open if the need does.
+Decided against for now; each entry's `needs` line says what would bring it back. Not retired; the row returns to Open if the need does.
 
 ### `viewer-selection-isolation`
 
 - side: protocol
 - state: deferred (2026-09-20)
 - needs: A second viewer attached on purpose. Until then this machine wants shared selection: `wezterm cli activate-pane-direction` is supposed to move the one GUI. A codec bump and mux restart for a two-GUI design would be the wrong cost
-- why: Focusing a pane in one GUI moves every other attached GUI's active tab, and a GUI receives its own focus echo. Reproduced 2026-09-19 on a throwaway mux: raising one window moved the other from TAB-0 to TAB-2; the trigger is OS window focus, not a headless activation. The bug is real and not this machine's. There is one GUI; a second on `human-main` is forbidden because it acks attention markers, and isolation would not lift that. The freeze is `pr-7763`, not this. Tab order on relaunch is `tab-order-on-reattach` and does not depend on this while there is one GUI. Build it if a second viewer is ever a workflow
+- why: Focusing a pane in one GUI moves every other attached GUI's active tab, and a GUI receives its own focus echo. Reproduced 2026-09-19 on a throwaway mux: raising one window moved the other from TAB-0 to TAB-2; the trigger is OS window focus, not a headless activation. The bug is real and not this machine's. There is one GUI; a second on `human-main` is forbidden because it acks attention markers, and isolation would not lift that. The freeze is `pr-7763`, not this. Tab order on relaunch is the unit `tab-order-over-protocol`, which does not depend on this. Build it if a second viewer is ever a workflow
 - notes: `2026-09-19-mux-viewer-selection-and-tab-order.md`
 
 ### `termwiz-repaint-follow-ups`
@@ -116,3 +196,19 @@ Decided against for the current topology (one GUI on `human-main`). Not retired;
 - needs: a program on this machine that paints through termwiz's `BufferedTerminal`, or an upstream reviewer of `blank-row-keeps-reset` asking about one of these. Nothing in the engine does today: outside `termwiz/` and `wezterm-surface/`, no code uses `BufferedTerminal` or `Surface::get_changes` (searched at `df473bbd6`)
 - why: Two faults in `Surface::repaint_all()`, found by reading while `blank-row-keeps-reset` was reviewed; neither was run. (1) The backward scan for a trailing run of clears takes a line that has text and ends in `ClearToEndOfLine(color)` as part of the run, so on a screen cleared to a colour the forward pass emits `ClearToEndOfScreen` in place of such lines: `Surface::new(3, 2)`, `ClearScreen(Red)`, `"a"`, a move to row 1, `"b"` would leave `"b"` unpainted. (2) `repaint_all()` does not end with the surface's current attributes, so a delta drawn after a repaint starts from whatever the last line left.
 - notes: `2026-10-19-get-text-escapes-drops-reset-after-blank-row.md`
+
+### `kitty-encoded-animation`
+
+- side: server
+- state: deferred (2026-11-25)
+- needs: a program that needs one image path to both animate and zoom. bootstrap's image viewer, the one user, sends an animated file through the iTerm2 file escape (`OSC 1337 File=`, which plays but cannot crop or offset) and everything else through kitty, which zooms
+- why: A kitty transmit of a file (`a=t,t=f,f=100`) is decoded in the `KittyImageFormat::Png` arm of `kitty_img_transmit_inner` (`term/src/terminalstate/kitty.rs`) with `image::load_from_memory` into `ImageDataType::new_single_frame`, so an animated GIF, WebP or PNG shows its first frame only; the iTerm2 escape keeps `ImageDataType::EncodedFile`, which the window plays through `run_decoder_thread`. The note proposed keeping `EncodedFile` for a multi-frame kitty file. That extends the kitty protocol, whose `f=100` means PNG, so it would be a fork-only behaviour. If the need returns, carry wezterm/wezterm#7558 first (open, 2026-02-04): it adds kitty animation control (`a=a`) and replaces an image's earlier placement instead of stacking a new one over it, which is how `chafa -f kitty` animates by sending each frame (not checked here)
+- notes: `2026-10-23-image-sampling-and-kitty-animation.md`
+
+### `drawable-wait-bound`
+
+- side: gui
+- state: deferred (2026-11-25)
+- needs: the stall seen again without another program pushing the GPU to its memory limit, or a wgpu release that lets a Metal surface time out
+- why: On 2026-11-14 a window's main thread waited 27 minutes in `-[CAMetalLayer nextDrawable]` (`do_paint_webgpu` → `Surface::get_current_texture` → wgpu-hal metal `acquire_texture`) while a local model server held up to 96 GB of wired memory; the window could not take input or quit, and recovered by itself; the mux and every pane kept running (engine `20261102-192317-c41a7a07`). The wait is one call, not a retry loop: wgpu-hal 25.0.2, the version in `Cargo.lock`, configures the layer with `setAllowsNextDrawableTimeout:false` and ignores the timeout `acquire_texture` is given (`_timeout_ms //TODO`), and wgpu 30.0.2 does the same; `do_paint_webgpu` retries only on `Lost` or `Outdated`, once. gfx-rs/wgpu#9141 (merged 2026-03-08) returns `SurfaceError::Occluded` for a hidden window and does not cover this. Bounding the wait would mean carrying a wgpu-hal patch (allow the 1 s timeout, return a timeout when `nextDrawable` gives nil) and skipping the frame in `do_paint_webgpu`, a dependency patch carried for a stall that only machine-wide GPU memory exhaustion has caused. The mitigation that exists is a memory limit on the other program
+- notes: `2026-11-16-gui-repaint-blocked-27-minutes-nextdrawable.md`

@@ -195,6 +195,23 @@ where
                     stream.flush().await.context("flushing PDU to client")?;
                 }
             }
+            Ok(Item::Notif(MuxNotification::WindowTabOrderChanged(window_id))) => {
+                // A client re-reads the pane list on TabAddedToWindow and
+                // does not use its tab_id, so the first tab stands in. A PDU
+                // of its own for the new order would make a client that
+                // predates it drop the connection.
+                let tab_id = {
+                    let mux = Mux::get();
+                    mux.get_window(window_id)
+                        .and_then(|w| w.get_tab_at_idx(0).map(|tab| tab.tab_id()))
+                };
+                if let Some(tab_id) = tab_id {
+                    Pdu::TabAddedToWindow(codec::TabAddedToWindow { tab_id, window_id })
+                        .encode_async(&mut stream, 0)
+                        .await?;
+                    stream.flush().await.context("flushing PDU to client")?;
+                }
+            }
             Ok(Item::Notif(MuxNotification::PaneFocused(pane_id))) => {
                 Pdu::PaneFocused(codec::PaneFocused { pane_id })
                     .encode_async(&mut stream, 0)
@@ -219,6 +236,9 @@ where
                     .await?;
                 stream.flush().await.context("flushing PDU to client")?;
             }
+            // Not pushed: a client that predates a pushed PDU drops the
+            // connection. Clients ask for names with ListWindowNames.
+            Ok(Item::Notif(MuxNotification::WindowNameChanged { .. })) => {}
             Ok(Item::Notif(MuxNotification::WorkspaceRenamed {
                 old_workspace,
                 new_workspace,

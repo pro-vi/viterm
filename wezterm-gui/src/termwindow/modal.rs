@@ -20,6 +20,18 @@ pub trait Modal: Downcast {
         mods: KeyModifiers,
         term_window: &mut TermWindow,
     ) -> anyhow::Result<bool>;
+    /// Called for a key down that `key_down` passed on and no key
+    /// assignment took. Returns true when the key should go on to the pane,
+    /// as when the modal closed itself for it; by default it goes no further.
+    fn key_down_unbound(
+        &self,
+        key: KeyCode,
+        mods: KeyModifiers,
+        term_window: &mut TermWindow,
+    ) -> bool {
+        self.key_down(key, mods, term_window).ok();
+        false
+    }
     fn computed_element(
         &self,
         term_window: &mut TermWindow,

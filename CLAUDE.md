@@ -6,10 +6,10 @@ upstream contribution checkout, and the workflow in `CONTRIBUTING.md` — commit
 branch, open a pull request against wezterm/wezterm — describes upstream's
 process, not this one. Read this file first.
 
-If you are reading this, you are on the `build` branch. This file, `PATCHES.md`,
-`BACKLOG.md` and `docs/plans/` exist only there, on purpose: a unit branch must
-contain nothing but its own change. `.inbox/` holds local investigation notes
-and is deliberately untracked.
+If you are reading this, you are on the `build` branch. This file, `PATCHES.md`
+and `BACKLOG.md` exist only there, on purpose: a unit branch must contain
+nothing but its own change. `.inbox/` holds local investigation notes and
+`docs/plans/` local plans; both are deliberately untracked.
 
 ## The four kinds of branch
 
@@ -48,12 +48,37 @@ It is: *does this need another unit's code in order to compile and work?*
   `unit/tab-bar-row-status` is the example: there is no second row to put a
   status on without `unit/tab-bar-rows`.
 
+Before writing a unit for a defect in upstream's code, search wezterm/wezterm
+for a pull request that already fixes it, and carry that one as
+`pr-<number>-<slug>`: it keeps its author, and `git cherry` retires the unit
+when upstream merges it, which a second patch for the same defect cannot do.
+Search by the name of the function or type as well as by the symptom
+(`gh search issues --repo wezterm/wezterm --include-prs '<name>'`), and read
+the pull requests an issue's thread links: a pull request is titled after its
+code change, so a search for the symptom can miss it.
+
+`upstream/main` here means the upstream commit `build` stands on,
+`git merge-base build upstream/main`. Once a fetch has moved `upstream/main`
+past it, cut the unit from that commit: `git merge --no-ff` brings in the
+unit's whole history, so a unit cut from the newer `upstream/main` would carry
+upstream's new commits into `build` outside a reassembly. Its ledger `base`
+still says `upstream/main`, and the next reassembly rebases it with the rest.
+
+Build the unit in a worktree of its own, so `build` stays checked out here. A
+new worktree has no compiled target, so clone the one of a worktree on the
+same base: `cp -cR <that worktree>/target <new worktree>/target`. On APFS the
+clone takes no extra disk space, and Cargo then rebuilds the workspace crates,
+whose paths differ, and reuses the rest: on 2026-11-25 the GUI's debug build
+compiled 61 crates, 60 of them the workspace's own, in 2 min 26 s with
+`CARGO_BUILD_JOBS=1`.
+
 ```bash
-git switch -c unit/<slug> upstream/main     # or off the unit it truly needs
+git worktree add -b unit/<slug> ~/Development/_worktrees/viterm-<slug> \
+  $(git merge-base build upstream/main)      # or off the unit it truly needs
 # … one change, one commit, message written for an upstream reader:
 #   no mention of bootstrap, ViTerm, this machine, or a plan …
 cargo check                                  # the unit must pass on its own
-git switch build
+# then, in this checkout, where build is checked out:
 git merge --no-ff unit/<slug>
 # add its row to PATCHES.md and commit that separately
 ```
@@ -63,7 +88,7 @@ Two rules that are easy to break by accident:
 - **Do not commit to `build` directly.** A change that exists only on `build`
   can never be sent upstream and will be lost the next time `build` is
   reassembled. Fork-only files (`AGENTS.md`, `CLAUDE.md`, `PATCHES.md`,
-  `BACKLOG.md`, `docs/plans/`, `fork/`) are the sole exception. Engine patches land on `build` only as
+  `BACKLOG.md`, `fork/`) are the sole exception. Engine patches land on `build` only as
   the contents of the `--no-ff` merge commits, conflict resolution included —
   never as a follow-up commit after the merge.
 - **Never install a unit-branch build or use it as evidence of what this machine runs.**
@@ -279,7 +304,11 @@ by hand.
 ## Where the rest of the story is
 
 - `PATCHES.md` — what each unit is and how it was proven.
-- `docs/plans/` — carry and fix plans that exist only on `build`.
+- `docs/plans/` — carry and fix plans. This repo is public and plans name
+  folders on this machine, so they stay here, untracked (`.git/info/exclude`).
+  `build` commits from before 2026-10-28 still track them: checking one out
+  overwrites the local copies with the committed ones, and switching back
+  deletes them, so copy the folder aside first.
 - `.inbox/` — the investigations behind the units, notably the 2026-09-06 note
   tracing the ViTerm freeze to the focus-echo loop and proposing the unit list.
   These are notes, not rules; this file holds the rules. They stay on this

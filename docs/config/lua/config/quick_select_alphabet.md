@@ -25,3 +25,10 @@ accessible characters in a `qwerty` keyboard layout.
 The suggested alphabet in the above table uses the left 4 fingers on the home row, top row, bottom
 row, then the right 4 fingers on the home row, top row, bottom row, followed by the characters in
 the middle of the keyboard that may be harder to reach.
+
+{{since('nightly')}}
+
+The same alphabet gives the hints drawn on folded tab groups by
+[window:show_tab_group_hints()](../window/show_tab_group_hints.md) and on the
+tabs in a tab group popup: one letter per item, in the order the items are
+drawn, each letter used once.

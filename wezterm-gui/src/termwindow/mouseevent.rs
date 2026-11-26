@@ -1,4 +1,5 @@
 use crate::tabbar::TabBarItem;
+use crate::termwindow::tabgrouppopup::{press_on_popup, PressOnPopup};
 use crate::termwindow::{
     GuiWin, MouseCapture, PositionedSplit, ScrollHit, TermWindowNotif, UIItem, UIItemType, TMB,
 };
@@ -39,7 +40,8 @@ impl super::TermWindow {
             UIItemType::TabBar(_) => {
                 self.update_title_post_status();
             }
-            UIItemType::CloseTab(_)
+            UIItemType::TabGroupPopup(_)
+            | UIItemType::CloseTab(_)
             | UIItemType::AboveScrollThumb
             | UIItemType::BelowScrollThumb
             | UIItemType::ScrollThumb
@@ -50,7 +52,8 @@ impl super::TermWindow {
     fn enter_ui_item(&mut self, item: &UIItem) {
         match item.item_type {
             UIItemType::TabBar(_) => {}
-            UIItemType::CloseTab(_)
+            UIItemType::TabGroupPopup(_)
+            | UIItemType::CloseTab(_)
             | UIItemType::AboveScrollThumb
             | UIItemType::BelowScrollThumb
             | UIItemType::ScrollThumb
@@ -125,6 +128,12 @@ impl super::TermWindow {
             WMEK::Release(ref press) => {
                 self.current_mouse_capture = None;
                 self.current_mouse_buttons.retain(|p| p != press);
+                if self.popup_dismiss_press == Some(*press) {
+                    // The press that closed a tab group popup went no further,
+                    // and neither does its release.
+                    self.popup_dismiss_press = None;
+                    return;
+                }
                 if press == &MousePress::Left && self.window_drag_position.take().is_some() {
                     // Completed a window drag
                     return;
@@ -216,6 +225,29 @@ impl super::TermWindow {
             None
         };
 
+        // A press outside an open tab group popup closes it. In the tab bar it
+        // then acts as it would with no popup, and a press on a group's item
+        // toggles that group's popup instead; anywhere else it goes no
+        // further, and neither does its release.
+        if let WMEK::Press(press) = &event.kind {
+            // A press while tab group hints are shown closes them, then acts
+            // as it would without them.
+            self.close_tab_group_hints();
+            if self.open_popup_tab().is_some() {
+                match press_on_popup(ui_item.as_ref().map(|item| &item.item_type)) {
+                    PressOnPopup::Keep => {}
+                    PressOnPopup::CloseAndAct => self.close_tab_group_popup(),
+                    PressOnPopup::CloseOnly => {
+                        self.close_tab_group_popup();
+                        self.popup_dismiss_press = Some(*press);
+                        // Nor does it count toward a double click.
+                        self.last_mouse_click = None;
+                        return;
+                    }
+                }
+            }
+        }
+
         if let Some(item) = ui_item.clone() {
             if capture_mouse {
                 self.current_mouse_capture = Some(MouseCapture::UI);
@@ -239,7 +271,15 @@ impl super::TermWindow {
             );
         }
 
-        if prior_ui_item != ui_item {
+        // Moving over a tab group popup changes nothing in the tab bar, so
+        // it does not rebuild it (each rebuild calls format-tab-title for
+        // every tab).
+        let popup_or_none = |item: &Option<UIItem>| {
+            item.as_ref().map_or(true, |item| {
+                matches!(item.item_type, UIItemType::TabGroupPopup(_))
+            })
+        };
+        if prior_ui_item != ui_item && !(popup_or_none(&prior_ui_item) && popup_or_none(&ui_item)) {
             self.update_title_post_status();
         }
     }
@@ -382,6 +422,13 @@ impl super::TermWindow {
             UIItemType::CloseTab(idx) => {
                 self.mouse_event_close_tab(idx, event, context);
             }
+            UIItemType::TabGroupPopup(entry) => {
+                if let (Some(tab_idx), WMEK::Press(MousePress::Left)) = (entry, &event.kind) {
+                    self.activate_tab(tab_idx as isize).ok();
+                    self.close_tab_group_popup();
+                }
+                context.set_cursor(Some(CursorIcon::Default));
+            }
         }
     }
 
@@ -464,6 +511,9 @@ impl super::TermWindow {
                 TabBarItem::Tab { tab_idx, .. } => {
                     self.activate_tab(tab_idx as isize).ok();
                 }
+                TabBarItem::TabGroup { group_idx, .. } => {
+                    self.toggle_tab_group_popup(group_idx);
+                }
                 TabBarItem::NewTabButton { .. } => {
                     self.do_new_tab_button_click(MousePress::Left);
                 }
@@ -517,13 +567,14 @@ impl super::TermWindow {
                 TabBarItem::NewTabButton { .. } => {
                     self.do_new_tab_button_click(MousePress::Middle);
                 }
-                TabBarItem::None
+                TabBarItem::TabGroup { .. }
+                | TabBarItem::None
                 | TabBarItem::LeftStatus(_)
                 | TabBarItem::RightStatus(_)
                 | TabBarItem::WindowButton(_) => {}
             },
             WMEK::Press(MousePress::Right) => match item {
-                TabBarItem::Tab { .. } => {
+                TabBarItem::Tab { .. } | TabBarItem::TabGroup { .. } => {
                     self.show_tab_navigator();
                 }
                 TabBarItem::NewTabButton { .. } => {
@@ -550,6 +601,7 @@ impl super::TermWindow {
                 }
                 TabBarItem::WindowButton(_)
                 | TabBarItem::Tab { .. }
+                | TabBarItem::TabGroup { .. }
                 | TabBarItem::NewTabButton { .. } => {}
             },
             WMEK::VertWheel(n) => {
