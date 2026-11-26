@@ -29,7 +29,8 @@ Measured 2026-11-25 with engine 20261117-191650-92b446ea, a window of about
 
 28 MB a reload is two images of the window's size, and it stops only when the
 cache is full. A fix passes when ten reloads with new colours at 1024 grow by
-no more than the two images in use.
+no more than the two images in use. With `reload-drops-old-backgrounds`
+(debug build of unit 0a1ff9c19): +0.0, +28.0 and +28.0 MB.
 """
 import os
 import subprocess

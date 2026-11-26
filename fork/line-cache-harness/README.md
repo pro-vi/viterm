@@ -86,11 +86,11 @@ machine ran out of memory while this window held 43 GB.
 **Not claimed.** The ceiling is not small: the fix restores the limit, it
 does not lower it. The mux server's memory is untouched. Tab bar and input
 latency are untouched. A machine can still run out of memory when another
-program takes it all. Background gradient images also grow the window, by
-about 60 MB for each config reload that changes the palette
-(`background-gradient-retained` in `BACKLOG.md`); they are `MALLOC_LARGE`
-regions the size of the window in `footprint --pid <pid>`, and do not count
-for or against this fix.
+program takes it all. On an engine without `reload-drops-old-backgrounds`
+(in `PATCHES.md`), background gradient images also grow the window, by about
+60 MB for each config reload that changes the palette; they are
+`MALLOC_LARGE` regions the size of the window in `footprint --pid <pid>`, and
+do not count for or against this fix.
 
 **How to check.** `live-check.py` reads the running window and changes
 nothing:
