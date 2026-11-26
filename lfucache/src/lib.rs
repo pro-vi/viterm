@@ -271,31 +271,40 @@ impl<K: Hash + Eq + Clone + Debug, V, S: Default + BuildHasher> LfuCache<K, V, S
         None
     }
 
+    /// Remove the entry for `k`, returning true if there was one
+    pub fn remove<Q: ?Sized>(&mut self, k: &Q) -> bool
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq,
+    {
+        let bucket = self.bucket_for_key(&k);
+        let mut cursor = self
+            .buckets
+            .get_mut(bucket)
+            .expect("valid bucket index")
+            .front_mut();
+        while let Some(entry) = cursor.get() {
+            if entry.key.borrow() == k {
+                unsafe {
+                    self.frequency_index.cursor_mut_from_ptr(entry).remove();
+                    self.recency_index.cursor_mut_from_ptr(entry).remove();
+                }
+                cursor.remove();
+                self.len -= 1;
+                return true;
+            }
+            cursor.move_next();
+        }
+        false
+    }
+
     pub fn put(&mut self, k: K, v: V) {
         let bucket = self.bucket_for_key(&k);
 
         self.tick += 1;
 
         // Remove any prior value
-        {
-            let mut cursor = self
-                .buckets
-                .get_mut(bucket)
-                .expect("valid bucket index")
-                .front_mut();
-            while let Some(entry) = cursor.get() {
-                if entry.key == k {
-                    unsafe {
-                        self.frequency_index.cursor_mut_from_ptr(entry).remove();
-                        self.recency_index.cursor_mut_from_ptr(entry).remove();
-                    }
-                    cursor.remove();
-                    self.len -= 1;
-                    break;
-                }
-                cursor.move_next();
-            }
-        }
+        self.remove(&k);
 
         while self.len >= self.cap {
             self.evict_one();
@@ -819,5 +828,26 @@ mod test {
 ]
 "#
         );
+    }
+
+    #[test]
+    fn remove() {
+        let mut cache = LfuCacheU64::with_capacity(4);
+        for i in 0..4 {
+            cache.put(i, i);
+        }
+
+        k9::assert_equal!(cache.remove(&2), true);
+        k9::assert_equal!(cache.remove(&2), false);
+        k9::assert_equal!(cache.len(), 3);
+        k9::assert_equal!(frequency_order(&cache).len(), 3);
+        k9::assert_equal!(recency_order(&cache).len(), 3);
+
+        // The freed slot takes a new entry without evicting another
+        cache.put(4, 4);
+        k9::assert_equal!(cache.len(), 4);
+        for i in [0, 1, 3, 4] {
+            k9::assert_equal!(cache.get(&i), Some(&i));
+        }
     }
 }

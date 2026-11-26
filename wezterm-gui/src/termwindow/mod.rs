@@ -1831,12 +1831,29 @@ impl TermWindow {
 
         // Do this after we've potentially adjusted scaling based on config/padding
         // and window size
-        self.window_background = reload_background_image(
+        let window_background = reload_background_image(
             &config,
             &self.window_background,
             &self.dimensions,
             &self.render_metrics,
         );
+        // A gradient layer gets new noise, and so a new hash, each time a
+        // reload changes its colors or the window size. Remove the decoded
+        // images of the layers it replaced, or the glyph cache keeps each one
+        // until other images evict it.
+        if let Some(render_state) = self.render_state.as_ref() {
+            let mut glyph_cache = render_state.glyph_cache.borrow_mut();
+            for old in &self.window_background {
+                let hash = old.source.hash();
+                if !window_background
+                    .iter()
+                    .any(|layer| layer.source.hash() == hash)
+                {
+                    glyph_cache.image_cache.remove(&hash);
+                }
+            }
+        }
+        self.window_background = window_background;
 
         self.invalidate_modal();
         self.emit_window_event("window-config-reloaded", None);
