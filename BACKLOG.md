@@ -97,6 +97,15 @@ Named `tabbar-title-memo` until 2026-10-02; plans written before then use that n
 - needs: a window that has run `pr-7704-line-cache-capacity` for 14 days, read with `fork/line-cache-harness/live-check.py`: how far its footprint sits under the ceiling says whether a lower limit is worth an option
 - why: With `pr-7704-line-cache-capacity` a client pane caches at most `scrollback_lines` lines, the number the server keeps. The harness measured about 3.6 KB for a cached line of 112 coloured columns, so at `scrollback_lines = 50000` one pane may hold 180 MB and 148 panes 25 GB. The two numbers do different jobs: the server's is how far back a pane can be read, the client's only saves a fetch when a row is drawn again. If it is built: a client option for the cache size, read in `RenderableInner::new` and defaulting to `scrollback_lines`. Not tried: passing a lower `scrollback_lines` to the GUI alone with `--config`, which needs no engine change if nothing else in the GUI reads the option for a mux pane. Either way a row dropped from the cache is fetched again when it is scrolled to.
 
+### `background-gradient-retained`
+
+- side: gui
+- state: proposed
+- needs: nothing; `fork/gradient-reload-harness/run.py` is the test, and no wezterm/wezterm issue or pull request covers it (searched 2026-11-25 for `CachedGradient`, `glyph_cache_image_cache_size`, gradient and memory)
+- seen: 2026-11-25, the window on engine `20261117-191650-92b446ea` after 6.7 days: footprint 8.0 GB, of which 3.35 GB `MALLOC_LARGE`, and 78 of its regions, 2.3 GB, are 1830 or 2025 pages of 16 KiB, the size of an RGBA image of a full-screen window on the built-in display (3456 × 2168) and on a 4K display (3840 × 2160). Which object each region holds was not read; the sizes match. The window's config has two full-window gradient layers whose colours change at 06, 12, 17 and 21 o'clock
+- why: `config.background` gradients are computed in `CachedGradient::compute` at the window's pixel size, with random noise, on each config reload that changes the gradient or the size. `CachedGradient::sweep` drops the replaced image, but the glyph cache's `image_cache` (`LfuCache`, sized by `glyph_cache_image_cache_size`) keeps every image it has drawn until it is full. The harness shows 28 MB kept per reload with new colours and none with unchanged ones; with a cache of 4 the growth stops at 56 MB. At 1024 entries and 30 MB an image that allows 30 GB. It also confounds the live check of `pr-7704-line-cache-capacity`, whose ceiling counts only cached lines. If it is built: where `TermWindow::config_was_reloaded` replaces `window_background`, remove each image that is no longer a layer from `image_cache` and `frame_cache`, which needs a `remove` on `LfuCache`. Seeding the noise from the gradient and size instead would let a return to an earlier palette reuse its entry, which bounds this config, not the defect
+- notes: `2026-11-25-wezterm-gui-held-28-gb.md`
+
 ### `tab-bar-drag`
 
 - side: gui
